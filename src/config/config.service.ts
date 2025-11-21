@@ -6,13 +6,19 @@ dotenv.config();
 const schema = joi
   .object({
     PORT: joi.number().required(),
-    ENVIRONMENT: joi.string().valid('development', 'production', 'staging').required(),
+    ENVIRONMENT: joi
+      .string()
+      .valid('development', 'production', 'staging')
+      .required(),
     DATABASE_HOST: joi.string().required(),
     DATABASE_PORT: joi.string().required(),
     DATABASE_USERNAME: joi.string().required(),
     DATABASE_PASSWORD: joi.string().required(),
     DATABASE_NAME: joi.string().required(),
     JWTSECRET: joi.string().required(),
+    JWT_REFRESH_SECRET: joi.string().optional(),
+    JWT_ACCESS_EXPIRATION: joi.string().default('15m'),
+    JWT_REFRESH_EXPIRATION: joi.string().default('7d'),
   })
   .unknown()
   .required();
@@ -27,7 +33,12 @@ export const config = {
     APP_PORT: envVars.PORT,
   },
   ENVIRONMENT: envVars.ENVIRONMENT,
-  JWTSECRET: envVars.JWTSECRET,
+  JWT: {
+    SECRET: envVars.JWTSECRET,
+    REFRESH_SECRET: envVars.JWT_REFRESH_SECRET || envVars.JWTSECRET,
+    ACCESS_EXPIRATION: envVars.JWT_ACCESS_EXPIRATION || '15m',
+    REFRESH_EXPIRATION: envVars.JWT_REFRESH_EXPIRATION || '7d',
+  },
   DB: {
     PORT: Number(envVars.DATABASE_PORT),
     HOST: envVars.DATABASE_HOST,
@@ -35,5 +46,5 @@ export const config = {
     PASSWORD: envVars.DATABASE_PASSWORD,
     NAME: envVars.DATABASE_NAME,
     TRIPS_NAME: envVars.DATABASE_TRIPS_NAME,
-  }
+  },
 };

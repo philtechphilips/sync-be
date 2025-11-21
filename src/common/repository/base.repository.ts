@@ -24,7 +24,9 @@ export abstract class BaseRepository<T> {
     });
   }
 
-  async find(entityFilterQuery: FindOptionsWhere<T> | FindManyOptions<T>): Promise<T[]> {
+  async find(
+    entityFilterQuery: FindOptionsWhere<T> | FindManyOptions<T>,
+  ): Promise<T[]> {
     return this.entity.find(entityFilterQuery);
   }
 

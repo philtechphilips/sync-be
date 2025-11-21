@@ -2,7 +2,7 @@
 . "$(dirname "$0")/_/husky.sh"
 
 
-echo '🏗️👷 Formatting Document'
+echo 'Formatting Document'
 npm run format
 
 npm run test ||
@@ -28,7 +28,7 @@ npm run check-lint ||
 # Check tsconfig standards
 npm run check-types ||
 (
-    echo '🤡😂❌🤡 Failed Type check. 🤡😂❌🤡';       
+    echo 'Failed Type check.';       
     false;
 )
 
@@ -36,5 +36,5 @@ npm run check-types ||
 
 
 # If everything passes... Now we can commit
-echo '✅✅✅✅ You win this time... I am committing this now. ✅✅✅✅'
+echo 'You win this time... I am committing this now.'
 
