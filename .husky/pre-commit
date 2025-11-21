@@ -1,0 +1,40 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+
+echo 'Formatting Document'
+npm run format
+
+npm run test ||
+(
+    echo 'test are failing, please review and fix your code before committing';
+    false;
+)
+
+# Check Prettier standards
+npm run check-format ||
+(
+    echo 'bad code styling, please review and fix';
+    false;
+)
+
+# Check ESLint Standards
+npm run check-lint ||
+(
+        echo 'weak code, review and fix'
+        false; 
+)
+
+# Check tsconfig standards
+npm run check-types ||
+(
+    echo 'Failed Type check.';       
+    false;
+)
+
+
+
+
+# If everything passes... Now we can commit
+echo 'You win this time... I am committing this now.'
+
