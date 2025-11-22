@@ -1,6 +1,5 @@
-#!/bin/sh
-. "$(dirname "$0")/_/husky.sh"
-
+#!/usr/bin/env sh
+. "$(dirname "$0")/_/h"
 
 echo 'Formatting Document'
 npm run format
@@ -8,32 +7,29 @@ npm run format
 npm run test ||
 (
     echo 'test are failing, please review and fix your code before committing';
-    false;
+    exit 1;
 )
 
 # Check Prettier standards
 npm run check-format ||
 (
     echo 'bad code styling, please review and fix';
-    false;
+    exit 1;
 )
 
 # Check ESLint Standards
 npm run check-lint ||
 (
-        echo 'weak code, review and fix'
-        false; 
+    echo 'weak code, review and fix'
+    exit 1; 
 )
 
 # Check tsconfig standards
 npm run check-types ||
 (
     echo 'Failed Type check.';       
-    false;
+    exit 1;
 )
-
-
-
 
 # If everything passes... Now we can commit
 echo 'You win this time... I am committing this now.'
