@@ -4,17 +4,11 @@ import {
   Post,
   Body,
   Patch,
-  Param,
-  Delete,
   UseGuards,
-  Req,
   UsePipes,
   ValidationPipe,
   HttpException,
   HttpStatus,
-  UseInterceptors,
-  UploadedFile,
-  BadRequestException,
   Request,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
