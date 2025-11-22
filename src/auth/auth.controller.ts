@@ -117,14 +117,14 @@ export class AuthController {
   @Get('status')
   @Roles(Role.User)
   @UseGuards(JwtAuthGuard)
-  status(@Request() req) {
+  status(@Request() req: any) {
     return req.user;
   }
 
   @Patch('/')
   @UseGuards(JwtAuthGuard)
   @UsePipes(ValidationPipe)
-  update(@Request() req, @Body() updateAuthDto: UpdateAuthDto) {
+  update(@Request() req: any, @Body() updateAuthDto: UpdateAuthDto) {
     return this.authService.update(req.user.id, updateAuthDto);
   }
 }
