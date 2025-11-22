@@ -14,8 +14,7 @@ export class RegisterAuthDto {
   password: string;
 
   @IsString()
-  @IsNotEmpty()
-  @Length(1, 255)
+  @IsOptional()
   fullName: string;
 
   @IsEmail()

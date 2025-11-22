@@ -67,18 +67,7 @@ export class AuthController {
       const response = await this.authService.refreshToken(
         refreshTokenDto.refresh_token,
       );
-      return {
-        success: true,
-        user: {
-          id: response.id,
-          email: response.email,
-          full_name: response.full_name,
-          role: response.role,
-          profile_picture: response.profile_picture,
-        },
-        access_token: response.access_token,
-        message: 'Token refreshed successfully!',
-      };
+      return response;
     } catch (error) {
       if (error.status === 401) {
         throw new HttpException(
@@ -138,8 +127,10 @@ export class AuthController {
     return req.user;
   }
 
-  @Patch(':id')
-  update(@Param('id') id: string, @Body() updateAuthDto: UpdateAuthDto) {
-    return this.authService.update(id, updateAuthDto);
+  @Patch('/')
+  @UseGuards(JwtAuthGuard)
+  @UsePipes(ValidationPipe)
+  update(@Request() req, @Body() updateAuthDto: UpdateAuthDto) {
+    return this.authService.update(req.user.id, updateAuthDto);
   }
 }

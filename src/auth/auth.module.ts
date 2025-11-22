@@ -24,4 +24,3 @@ import { config } from '../config/config.service';
   exports: [AuthService],
 })
 export class AuthModule {}
-

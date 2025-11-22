@@ -1,4 +1,9 @@
-import { BadRequestException, HttpException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  HttpException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { LoginAuthDto } from './dto/login.dto';
 import { UpdateAuthDto } from './dto/update.dto';
 import { JwtService } from '@nestjs/jwt';
@@ -30,7 +35,7 @@ export class AuthService {
       }
 
       const { password: _, ...user } = findUser;
-      
+
       // Generate access token
       const accessToken = this.jwtService.sign(
         { id: user.id, email: user.email, role: user.role },
@@ -85,7 +90,10 @@ export class AuthService {
       }
 
       // Check if refresh token has expired
-      if (findUser.refresh_token_expiry && findUser.refresh_token_expiry < new Date()) {
+      if (
+        findUser.refresh_token_expiry &&
+        findUser.refresh_token_expiry < new Date()
+      ) {
         throw new UnauthorizedException('Refresh token has expired!');
       }
 
@@ -97,16 +105,32 @@ export class AuthService {
         { expiresIn: config.JWT.ACCESS_EXPIRATION },
       );
 
-      // Update access token in database
+      // Generate new refresh token
+      const newRefreshToken = this.jwtService.sign(
+        { id: user.id, email: user.email, role: user.role },
+        {
+          secret: config.JWT.REFRESH_SECRET,
+          expiresIn: config.JWT.REFRESH_EXPIRATION,
+        },
+      );
+
+      // Calculate refresh token expiry date from JWT expiration format
+      const refreshTokenExpiry = this.calculateTokenExpiry(
+        config.JWT.REFRESH_EXPIRATION,
+      );
+
+      // Update both tokens in database
       findUser.access_token = accessToken;
+      findUser.refresh_token = newRefreshToken;
+      findUser.refresh_token_expiry = refreshTokenExpiry;
       await this.authRepo.save(findUser);
 
       return {
         ...user,
         access_token: accessToken,
+        refresh_token: newRefreshToken,
       };
     } catch (error) {
-      console.log(error);
       throw new UnauthorizedException('Invalid refresh token!');
     }
   }
@@ -141,7 +165,13 @@ export class AuthService {
 
       await this.authRepo.save(findUser);
 
-      const { password, ...user } = findUser;
+      const {
+        password,
+        access_token,
+        refresh_token,
+        refresh_token_expiry,
+        ...user
+      } = findUser;
       return user;
     } catch (error) {
       throw error;
