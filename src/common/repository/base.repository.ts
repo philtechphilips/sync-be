@@ -6,10 +6,11 @@ import {
   FindManyOptions,
   SelectQueryBuilder,
   FindOptionsRelations,
+  ObjectLiteral,
 } from 'typeorm';
 import { IPaginationQuery } from '../interfaces/date-query';
 
-export abstract class BaseRepository<T> {
+export abstract class BaseRepository<T extends ObjectLiteral> {
   constructor(protected readonly entity: Repository<T>) {}
 
   async findOne(
@@ -17,11 +18,12 @@ export abstract class BaseRepository<T> {
     relations?: FindOptionsRelations<T>,
     projection?: Record<string, any>,
   ): Promise<T | undefined> {
-    return this.entity.findOne({
+    const result = await this.entity.findOne({
       where: entityFilterQuery,
       relations: relations,
       select: projection,
     });
+    return result ?? undefined;
   }
 
   async find(
@@ -44,7 +46,8 @@ export abstract class BaseRepository<T> {
     updateEntityData: Partial<unknown>,
   ): Promise<T | undefined> {
     await this.entity.update(entityFilterQuery, updateEntityData);
-    return this.entity.findOne({ where: entityFilterQuery });
+    const result = await this.entity.findOne({ where: entityFilterQuery });
+    return result ?? undefined;
   }
 
   async deleteMany(entityFilterQuery: FindOptionsWhere<T>): Promise<boolean> {
@@ -61,7 +64,7 @@ export abstract class BaseRepository<T> {
   }
 }
 
-export async function applyPagination<T>(
+export async function applyPagination<T extends ObjectLiteral>(
   queryBuilder: SelectQueryBuilder<T>,
   pagination: IPaginationQuery,
 ): Promise<SelectQueryBuilder<T>> {

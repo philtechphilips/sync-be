@@ -1,23 +1,23 @@
-import { IsNotEmpty, IsNumber, IsString } from 'class-validator';
+import { IsNotEmpty, IsString, IsOptional } from 'class-validator';
 
 export class GoogleDto {
   @IsString()
   @IsNotEmpty()
   accessToken: string;
 
-  @IsNumber()
-  @IsNotEmpty()
-  expiresIn: number;
+  @IsString()
+  @IsOptional()
+  id?: string;
 
   @IsString()
-  @IsNotEmpty()
-  scope: string;
+  @IsOptional()
+  email?: string;
 
   @IsString()
-  @IsNotEmpty()
-  tokenType: string;
+  @IsOptional()
+  name?: string;
 
   @IsString()
-  @IsNotEmpty()
-  refreshToken: string;
+  @IsOptional()
+  picture?: string;
 }

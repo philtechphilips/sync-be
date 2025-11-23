@@ -11,7 +11,7 @@ export class User {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column()
+  @Column({ nullable: true })
   full_name: string;
 
   @Column({ default: true })
@@ -37,6 +37,12 @@ export class User {
 
   @Column({ nullable: true })
   profile_picture: string;
+
+  @Column({ nullable: true, default: 'local' })
+  provider: string;
+
+  @Column({ nullable: true })
+  google_id: string;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
