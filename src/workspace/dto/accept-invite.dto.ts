@@ -1,9 +1,4 @@
-import {
-  IsString,
-  IsNotEmpty,
-  IsOptional,
-  Length,
-} from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, Length } from 'class-validator';
 
 export class AcceptInviteDto {
   @IsString()
@@ -19,4 +14,3 @@ export class AcceptInviteDto {
   @IsOptional()
   full_name?: string;
 }
-

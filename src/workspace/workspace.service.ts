@@ -258,11 +258,16 @@ export class WorkSpaceService {
 
     // Check if invitation has already been accepted
     if (member.invitation_accepted_at) {
-      throw new BadRequestException('This invitation has already been accepted');
+      throw new BadRequestException(
+        'This invitation has already been accepted',
+      );
     }
 
     // Check if invitation has expired
-    if (member.invitation_expires_at && new Date() > member.invitation_expires_at) {
+    if (
+      member.invitation_expires_at &&
+      new Date() > member.invitation_expires_at
+    ) {
       throw new BadRequestException('This invitation has expired');
     }
 
