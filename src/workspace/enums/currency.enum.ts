@@ -1,0 +1,22 @@
+export enum Currency {
+  USD = 'USD',
+  EUR = 'EUR',
+  GBP = 'GBP',
+  JPY = 'JPY',
+  CNY = 'CNY',
+  INR = 'INR',
+  CAD = 'CAD',
+  AUD = 'AUD',
+  CHF = 'CHF',
+  SEK = 'SEK',
+  NOK = 'NOK',
+  DKK = 'DKK',
+  PLN = 'PLN',
+  BRL = 'BRL',
+  MXN = 'MXN',
+  ZAR = 'ZAR',
+  AED = 'AED',
+  SGD = 'SGD',
+  HKD = 'HKD',
+}
+
