@@ -8,9 +8,13 @@ import { WorkspaceRepository } from './repository/workspace.repository';
 import { EmailService } from '../common/services/email.service';
 import { AuthRepo } from '../auth/repository/auth.repository';
 import { User } from '../auth/entities/user.entity';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Workspace, WorkspaceMember, User])],
+  imports: [
+    TypeOrmModule.forFeature([Workspace, WorkspaceMember, User]),
+    AuthModule,
+  ],
   controllers: [WorkSpaceController],
   providers: [WorkSpaceService, WorkspaceRepository, EmailService, AuthRepo],
   exports: [WorkSpaceService],

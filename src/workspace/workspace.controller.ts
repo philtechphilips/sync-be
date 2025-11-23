@@ -15,7 +15,9 @@ import { WorkSpaceService } from './workspace.service';
 import { CreateWorkspaceDto } from './dto/create-workspace.dto';
 import { InviteMembersDto } from './dto/invite-member.dto';
 import { WorkspaceSettingsDto } from './dto/workspace-settings.dto';
+import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard';
+import { Public } from '../auth/decorators/public.decorators';
 
 @Controller('/v1/workspace')
 export class WorkSpaceController {
@@ -112,6 +114,35 @@ export class WorkSpaceController {
         success: true,
         data: result,
         message: 'Workspace settings updated successfully!',
+      };
+    } catch (error) {
+      if (error.status) {
+        throw new HttpException(
+          { success: false, message: error.message },
+          error.status,
+        );
+      }
+      throw new HttpException(
+        { success: false, message: 'Something went wrong!' },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * Accept workspace invitation
+   * If user doesn't exist, they will need to provide password and fullName to create an account
+   */
+  @Post('accept-invite')
+  @Public()
+  @UsePipes(ValidationPipe)
+  async acceptInvite(@Body() acceptInviteDto: AcceptInviteDto) {
+    try {
+      const result = await this.workSpaceService.acceptInvite(acceptInviteDto);
+      return {
+        success: true,
+        data: result,
+        message: 'Workspace invitation accepted successfully.',
       };
     } catch (error) {
       if (error.status) {

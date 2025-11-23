@@ -13,10 +13,13 @@ import { WorkspaceRepository } from './repository/workspace.repository';
 import { CreateWorkspaceDto } from './dto/create-workspace.dto';
 import { InviteMembersDto } from './dto/invite-member.dto';
 import { WorkspaceSettingsDto } from './dto/workspace-settings.dto';
+import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { Workspace } from './entities/workspace.entity';
 import { WorkspaceMember } from './entities/workspace-member.entity';
 import { EmailService } from '../common/services/email.service';
 import { AuthRepo } from '../auth/repository/auth.repository';
+import { AuthService } from '../auth/auth.service';
+import { RegisterAuthDto } from '../auth/dto/register.dto';
 
 @Injectable()
 export class WorkSpaceService {
@@ -26,6 +29,7 @@ export class WorkSpaceService {
     private readonly workspaceMemberRepository: Repository<WorkspaceMember>,
     private readonly emailService: EmailService,
     private readonly authRepo: AuthRepo,
+    private readonly authService: AuthService,
   ) {}
 
   /**
@@ -232,6 +236,86 @@ export class WorkSpaceService {
     }
 
     return workspace;
+  }
+
+  /**
+   * Accept workspace invitation
+   */
+  async acceptInvite(
+    acceptInviteDto: AcceptInviteDto,
+  ): Promise<{ member: WorkspaceMember; workspace: Workspace; user?: any }> {
+    // Find workspace member by invitation token
+    const member = await this.workspaceMemberRepository.findOne({
+      where: {
+        invitation_token: acceptInviteDto.invitation_token,
+      },
+      relations: ['workspace'],
+    });
+
+    if (!member) {
+      throw new NotFoundException('Invalid invitation token');
+    }
+
+    // Check if invitation has already been accepted
+    if (member.invitation_accepted_at) {
+      throw new BadRequestException('This invitation has already been accepted');
+    }
+
+    // Check if invitation has expired
+    if (member.invitation_expires_at && new Date() > member.invitation_expires_at) {
+      throw new BadRequestException('This invitation has expired');
+    }
+
+    // Check if user exists by email
+    let user = await this.authRepo.findOne({ email: member.email });
+
+    // If user doesn't exist, create account
+    if (!user) {
+      // Validate that password and fullName are provided for account creation
+      if (!acceptInviteDto.password) {
+        throw new BadRequestException(
+          'Password is required to create an account',
+        );
+      }
+
+      // Create user account
+      const registerDto: RegisterAuthDto = {
+        email: member.email,
+        password: acceptInviteDto.password,
+        full_name: acceptInviteDto.full_name || '',
+        role: 'user',
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+
+      user = await this.authService.create(registerDto);
+    }
+
+    // Verify that the user's email matches the invited email
+    if (user.email !== member.email) {
+      throw new UnauthorizedException(
+        'This invitation was sent to a different email address',
+      );
+    }
+
+    // Update workspace member with user ID and acceptance timestamp
+    member.user_id = user.id;
+    member.invitation_accepted_at = new Date();
+    const updatedMember = await this.workspaceMemberRepository.save(member);
+
+    // Get workspace information
+    const workspace = await this.workspaceRepository.findOne({
+      id: member.workspace_id,
+    });
+
+    if (!workspace) {
+      throw new NotFoundException('Workspace not found');
+    }
+
+    // Remove sensitive information from user object
+    const { password: _, ...userWithoutPassword } = user;
+
+    return { member: updatedMember, workspace, user: userWithoutPassword };
   }
 
   /**

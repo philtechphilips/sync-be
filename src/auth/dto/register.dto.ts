@@ -15,7 +15,7 @@ export class RegisterAuthDto {
 
   @IsString()
   @IsOptional()
-  fullName: string;
+  full_name: string;
 
   @IsEmail()
   @IsNotEmpty()
@@ -26,8 +26,8 @@ export class RegisterAuthDto {
   role?: string;
 
   @Type(() => Date)
-  createdAt: Date;
+  created_at: Date;
 
   @Type(() => Date)
-  updatedAt: Date;
+  updated_at: Date;
 }
