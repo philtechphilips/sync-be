@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   HttpException,
+  HttpStatus,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -10,7 +11,6 @@ import { JwtService } from '@nestjs/jwt';
 import { RegisterAuthDto } from './dto/register.dto';
 import { hashPassword, validatePassword } from '../common/password';
 import { AuthRepo } from './repository/auth.repository';
-import { GoogleDto } from './dto/google.dto';
 import { config } from '../config/config.service';
 
 @Injectable()
@@ -178,13 +178,184 @@ export class AuthService {
     }
   }
 
-  async google(googleDto: GoogleDto) {
+  getGoogleAuthUrl(): string {
+    const params = new URLSearchParams({
+      client_id: config.GOOGLE.CLIENT_ID,
+      redirect_uri: config.GOOGLE.REDIRECT_URI,
+      response_type: 'code',
+      scope: 'openid email profile',
+      access_type: 'offline',
+      prompt: 'consent',
+    });
+
+    return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+  }
+
+  async handleGoogleCallback(code: string) {
     try {
-      return { success: true, message: 'Google login successful!' };
-      //   const response = await this.authRepo.findOne({ email: googleDto.email, provider: 'google' });
-      //   return response;
+      // Exchange authorization code for tokens
+      const tokenResponse = await fetch(
+        'https://oauth2.googleapis.com/token',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({
+            code,
+            client_id: config.GOOGLE.CLIENT_ID,
+            client_secret: config.GOOGLE.CLIENT_SECRET,
+            redirect_uri: config.GOOGLE.REDIRECT_URI,
+            grant_type: 'authorization_code',
+          }),
+        },
+      );
+
+      if (!tokenResponse.ok) {
+        const errorData = await tokenResponse.json();
+        throw new UnauthorizedException(
+          errorData.error_description || 'Failed to exchange code for tokens',
+        );
+      }
+
+      const tokenData = await tokenResponse.json();
+      const { access_token } = tokenData;
+
+      // Get user info from Google
+      const userInfoResponse = await fetch(
+        'https://www.googleapis.com/oauth2/v2/userinfo',
+        {
+          headers: {
+            Authorization: `Bearer ${access_token}`,
+          },
+        },
+      );
+
+      if (!userInfoResponse.ok) {
+        throw new UnauthorizedException('Failed to fetch user info from Google');
+      }
+
+      const googleUserInfo: {
+        id: string;
+        email: string;
+        name?: string;
+        picture?: string;
+        verified_email?: boolean;
+      } = await userInfoResponse.json();
+
+      // Validate email
+      if (!googleUserInfo.email) {
+        throw new BadRequestException('Email is required from Google account!');
+      }
+
+      // Check if user exists by google_id first, then by email
+      let existingUser = await this.authRepo.findOne({
+        google_id: googleUserInfo.id,
+      });
+
+      if (!existingUser) {
+        existingUser = await this.authRepo.findOne({
+          email: googleUserInfo.email,
+        });
+      }
+
+      // If user exists but doesn't have google_id, update it
+      if (existingUser && !existingUser.google_id) {
+        existingUser.google_id = googleUserInfo.id;
+        existingUser.provider = 'google';
+        if (googleUserInfo.picture && !existingUser.profile_picture) {
+          existingUser.profile_picture = googleUserInfo.picture;
+        }
+        if (googleUserInfo.name && !existingUser.full_name) {
+          existingUser.full_name = googleUserInfo.name;
+        }
+        await this.authRepo.save(existingUser);
+      }
+
+      // Update profile picture and name if they've changed
+      if (existingUser && existingUser.google_id === googleUserInfo.id) {
+        let updated = false;
+        if (
+          googleUserInfo.picture &&
+          existingUser.profile_picture !== googleUserInfo.picture
+        ) {
+          existingUser.profile_picture = googleUserInfo.picture;
+          updated = true;
+        }
+        if (
+          googleUserInfo.name &&
+          existingUser.full_name !== googleUserInfo.name
+        ) {
+          existingUser.full_name = googleUserInfo.name;
+          updated = true;
+        }
+        if (updated) {
+          await this.authRepo.save(existingUser);
+        }
+      }
+
+      // If user doesn't exist, create new user
+      if (!existingUser) {
+        existingUser = await this.authRepo.create({
+          email: googleUserInfo.email,
+          full_name: googleUserInfo.name || undefined,
+          profile_picture: googleUserInfo.picture || undefined,
+          provider: 'google',
+          google_id: googleUserInfo.id,
+          requires_password: false,
+          role: 'user',
+        });
+      }
+
+      const { password: _, ...user } = existingUser;
+
+      // Generate access token
+      const accessToken = this.jwtService.sign(
+        { id: user.id, email: user.email, role: user.role },
+        { expiresIn: config.JWT.ACCESS_EXPIRATION },
+      );
+
+      // Generate refresh token
+      const refreshToken = this.jwtService.sign(
+        { id: user.id, email: user.email, role: user.role },
+        {
+          secret: config.JWT.REFRESH_SECRET,
+          expiresIn: config.JWT.REFRESH_EXPIRATION,
+        },
+      );
+
+      // Calculate refresh token expiry date
+      const refreshTokenExpiry = this.calculateTokenExpiry(
+        config.JWT.REFRESH_EXPIRATION,
+      );
+
+      // Save tokens to database
+      existingUser.refresh_token = refreshToken;
+      existingUser.refresh_token_expiry = refreshTokenExpiry;
+      existingUser.access_token = accessToken;
+      await this.authRepo.save(existingUser);
+
+      return {
+        id: user.id,
+        email: user.email,
+        full_name: user.full_name,
+        role: user.role,
+        profile_picture: user.profile_picture,
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      };
     } catch (error) {
       console.log(error);
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new HttpException(
+        'Failed to authenticate with Google',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
