@@ -134,9 +134,8 @@ export class WorkSpaceController {
   @UseGuards(JwtAuthGuard)
   async getWorkspace(@Param('workspaceId') workspaceId: string) {
     try {
-      const workspace = await this.workSpaceService.getWorkspaceById(
-        workspaceId,
-      );
+      const workspace =
+        await this.workSpaceService.getWorkspaceById(workspaceId);
       return {
         success: true,
         data: workspace,
@@ -155,6 +154,4 @@ export class WorkSpaceController {
       );
     }
   }
-
- 
 }

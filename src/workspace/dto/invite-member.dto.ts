@@ -1,4 +1,13 @@
-import { IsString, IsNotEmpty, IsEmail, IsEnum, IsBoolean, IsOptional, ValidateNested, IsArray } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsEmail,
+  IsEnum,
+  IsBoolean,
+  IsOptional,
+  ValidateNested,
+  IsArray,
+} from 'class-validator';
 import { WorkspaceRole } from '../enums/workspace-role.enum';
 import { Type } from 'class-transformer';
 
@@ -31,4 +40,3 @@ export class InviteMembersDto {
   @IsOptional()
   can_view_analytics?: boolean;
 }
-

@@ -59,4 +59,3 @@ export class WorkspaceMember {
   @UpdateDateColumn({ name: 'updated_at' })
   updated_at: Date;
 }
-

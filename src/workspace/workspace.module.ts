@@ -12,12 +12,7 @@ import { User } from '../auth/entities/user.entity';
 @Module({
   imports: [TypeOrmModule.forFeature([Workspace, WorkspaceMember, User])],
   controllers: [WorkSpaceController],
-  providers: [
-    WorkSpaceService,
-    WorkspaceRepository,
-    EmailService,
-    AuthRepo,
-  ],
+  providers: [WorkSpaceService, WorkspaceRepository, EmailService, AuthRepo],
   exports: [WorkSpaceService],
 })
 export class WorkspaceModule {}

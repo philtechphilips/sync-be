@@ -176,7 +176,9 @@ export class EmailService {
     } catch (error) {
       console.error('Error sending workspace invitation email:', error);
       const errorMessage = error.message || String(error);
-      throw new Error(`Failed to send workspace invitation email: ${errorMessage}`);
+      throw new Error(
+        `Failed to send workspace invitation email: ${errorMessage}`,
+      );
     }
   }
 }

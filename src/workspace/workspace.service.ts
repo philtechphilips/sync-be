@@ -18,7 +18,6 @@ import { WorkspaceMember } from './entities/workspace-member.entity';
 import { EmailService } from '../common/services/email.service';
 import { AuthRepo } from '../auth/repository/auth.repository';
 
-
 @Injectable()
 export class WorkSpaceService {
   constructor(
@@ -27,7 +26,7 @@ export class WorkSpaceService {
     private readonly workspaceMemberRepository: Repository<WorkspaceMember>,
     private readonly emailService: EmailService,
     private readonly authRepo: AuthRepo,
-  ) { }
+  ) {}
 
   /**
    * Create workspace with basic information
@@ -104,13 +103,16 @@ export class WorkSpaceService {
     // Update workspace permissions if provided
     const workspaceUpdateData: any = {};
     if (inviteMembersDto.can_invite_teammates !== undefined) {
-      workspaceUpdateData.can_invite_teammates = inviteMembersDto.can_invite_teammates;
+      workspaceUpdateData.can_invite_teammates =
+        inviteMembersDto.can_invite_teammates;
     }
     if (inviteMembersDto.can_manage_settings !== undefined) {
-      workspaceUpdateData.can_manage_settings = inviteMembersDto.can_manage_settings;
+      workspaceUpdateData.can_manage_settings =
+        inviteMembersDto.can_manage_settings;
     }
     if (inviteMembersDto.can_view_analytics !== undefined) {
-      workspaceUpdateData.can_view_analytics = inviteMembersDto.can_view_analytics;
+      workspaceUpdateData.can_view_analytics =
+        inviteMembersDto.can_view_analytics;
     }
 
     // Update workspace if any permissions are provided
@@ -126,7 +128,6 @@ export class WorkSpaceService {
     const errors: string[] = [];
 
     for (const memberDto of inviteMembersDto.members) {
-
       // Check if member already exists for this workspace
       const existingMember = await this.workspaceMemberRepository.findOne({
         where: {
@@ -136,9 +137,7 @@ export class WorkSpaceService {
       });
 
       if (existingMember) {
-        errors.push(
-          `Member with email ${memberDto.email} is already invited`,
-        );
+        errors.push(`Member with email ${memberDto.email} is already invited`);
         continue;
       }
 

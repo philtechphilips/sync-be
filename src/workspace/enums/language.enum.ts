@@ -12,4 +12,3 @@ export enum Language {
   Hindi = 'hi',
   Russian = 'ru',
 }
-

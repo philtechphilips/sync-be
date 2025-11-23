@@ -3,4 +3,3 @@ export enum WorkspaceRole {
   Member = 'member',
   Viewer = 'viewer',
 }
-

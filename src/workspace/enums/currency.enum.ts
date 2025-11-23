@@ -19,4 +19,3 @@ export enum Currency {
   SGD = 'SGD',
   HKD = 'HKD',
 }
-

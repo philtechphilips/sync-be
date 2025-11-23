@@ -12,4 +12,3 @@ export class WorkspaceRepository extends BaseRepository<Workspace> {
     super(workspaceModel);
   }
 }
-

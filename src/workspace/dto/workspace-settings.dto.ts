@@ -1,4 +1,10 @@
-import { IsString, IsNotEmpty, IsEnum, IsOptional, IsBoolean } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsEnum,
+  IsOptional,
+  IsBoolean,
+} from 'class-validator';
 import { Language } from '../enums/language.enum';
 import { Currency } from '../enums/currency.enum';
 import { Theme } from '../enums/theme.enum';
@@ -18,4 +24,3 @@ export class WorkspaceSettingsDto {
   @IsNotEmpty()
   theme: Theme;
 }
-
