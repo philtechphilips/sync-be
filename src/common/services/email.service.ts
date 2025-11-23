@@ -9,7 +9,7 @@ export class EmailService {
   constructor() {
     // Gmail SMTP Configuration - Using explicit SMTP settings
     // Alternative: You can also use OAuth2 (requires googleapis package)
-    
+
     this.transporter = nodemailer.createTransport({
       host: config.SMTP.HOST || 'smtp.gmail.com',
       port: config.SMTP.PORT || 587,
@@ -32,7 +32,10 @@ export class EmailService {
     }
   }
 
-  async sendPasswordResetEmail(email: string, resetToken: string): Promise<void> {
+  async sendPasswordResetEmail(
+    email: string,
+    resetToken: string,
+  ): Promise<void> {
     const resetUrl = `${config.FRONTEND_URL}/auth/reset-password?token=${resetToken}`;
 
     const mailOptions = {
@@ -83,28 +86,31 @@ export class EmailService {
     try {
       // Verify connection before sending (optional, can be removed in production)
       await this.verifyConnection();
-      
+
       await this.transporter.sendMail(mailOptions);
       console.log(`Password reset email sent successfully to ${email}`);
     } catch (error) {
       console.error('Error sending email:', error);
       console.error('Full error details:', JSON.stringify(error, null, 2));
-      
+
       // Provide helpful error message for authentication issues
       const errorMessage = error.message || String(error);
-      if (errorMessage.includes('Invalid login') || errorMessage.includes('535-5.7.8') || errorMessage.includes('BadCredentials')) {
+      if (
+        errorMessage.includes('Invalid login') ||
+        errorMessage.includes('535-5.7.8') ||
+        errorMessage.includes('BadCredentials')
+      ) {
         throw new Error(
           `Email authentication failed. Please verify:\n` +
-          `1. SMTP_USER is your full Gmail address (e.g., yourname@gmail.com)\n` +
-          `2. SMTP_PASS is a valid 16-character App Password (generate at: https://myaccount.google.com/apppasswords)\n` +
-          `3. 2-Step Verification is enabled on your Google account\n` +
-          `4. The App Password was copied correctly (no spaces or extra characters)\n` +
-          `Original error: ${errorMessage}`
+            `1. SMTP_USER is your full Gmail address (e.g., yourname@gmail.com)\n` +
+            `2. SMTP_PASS is a valid 16-character App Password (generate at: https://myaccount.google.com/apppasswords)\n` +
+            `3. 2-Step Verification is enabled on your Google account\n` +
+            `4. The App Password was copied correctly (no spaces or extra characters)\n` +
+            `Original error: ${errorMessage}`,
         );
       }
-      
+
       throw new Error(`Failed to send password reset email: ${errorMessage}`);
     }
   }
 }
-
