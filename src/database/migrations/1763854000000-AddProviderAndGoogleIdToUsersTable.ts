@@ -19,4 +19,3 @@ export class AddProviderAndGoogleIdToUsersTable1763854000000
     await queryRunner.query(`ALTER TABLE "auth_users" DROP COLUMN "provider"`);
   }
 }
-

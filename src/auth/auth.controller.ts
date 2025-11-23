@@ -24,6 +24,8 @@ import { Roles } from './decorators/role.decorators';
 import { Role } from '../common/enums/role.enum';
 import { LoginAuthDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { config } from '../config/config.service';
 
 @Controller('/v1/auth')
@@ -162,5 +164,45 @@ export class AuthController {
   @UsePipes(ValidationPipe)
   update(@Request() req: any, @Body() updateAuthDto: UpdateAuthDto) {
     return this.authService.update(req.user.id, updateAuthDto);
+  }
+
+  @Post('forgot-password')
+  @Public()
+  @UsePipes(ValidationPipe)
+  async forgotPassword(@Body() forgotPasswordDto: ForgotPasswordDto) {
+    try {
+      return await this.authService.forgotPassword(forgotPasswordDto);
+    } catch (error) {
+      if (error.status === 400) {
+        throw new HttpException(
+          { success: false, message: error.message },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      throw new HttpException(
+        { success: false, message: 'Something went wrong!' },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  @Post('reset-password')
+  @Public()
+  @UsePipes(ValidationPipe)
+  async resetPassword(@Body() resetPasswordDto: ResetPasswordDto) {
+    try {
+      return await this.authService.resetPassword(resetPasswordDto);
+    } catch (error) {
+      if (error.status === 400) {
+        throw new HttpException(
+          { success: false, message: error.message },
+          HttpStatus.BAD_REQUEST,
+        );
+      }
+      throw new HttpException(
+        { success: false, message: 'Something went wrong!' },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
   }
 }

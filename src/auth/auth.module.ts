@@ -8,6 +8,7 @@ import { User } from './entities/user.entity';
 import { AuthRepo } from './repository/auth.repository';
 import { LocalStrategy } from './strategies/local.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { EmailService } from '../common/services/email.service';
 import { config } from '../config/config.service';
 
 @Module({
@@ -20,7 +21,7 @@ import { config } from '../config/config.service';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, AuthRepo, LocalStrategy, JwtStrategy],
+  providers: [AuthService, AuthRepo, LocalStrategy, JwtStrategy, EmailService],
   exports: [AuthService],
 })
 export class AuthModule {}

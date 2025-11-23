@@ -4,20 +4,25 @@ import {
   HttpStatus,
   Injectable,
   UnauthorizedException,
+  NotFoundException,
 } from '@nestjs/common';
 import { LoginAuthDto } from './dto/login.dto';
 import { UpdateAuthDto } from './dto/update.dto';
 import { JwtService } from '@nestjs/jwt';
 import { RegisterAuthDto } from './dto/register.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { hashPassword, validatePassword } from '../common/password';
 import { AuthRepo } from './repository/auth.repository';
 import { config } from '../config/config.service';
+import { EmailService } from '../common/services/email.service';
 
 @Injectable()
 export class AuthService {
   constructor(
     private jwtService: JwtService,
     private readonly authRepo: AuthRepo,
+    private readonly emailService: EmailService,
   ) {}
 
   async validateUser({ email, password }: LoginAuthDto) {
@@ -194,22 +199,19 @@ export class AuthService {
   async handleGoogleCallback(code: string) {
     try {
       // Exchange authorization code for tokens
-      const tokenResponse = await fetch(
-        'https://oauth2.googleapis.com/token',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: new URLSearchParams({
-            code,
-            client_id: config.GOOGLE.CLIENT_ID,
-            client_secret: config.GOOGLE.CLIENT_SECRET,
-            redirect_uri: config.GOOGLE.REDIRECT_URI,
-            grant_type: 'authorization_code',
-          }),
+      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
         },
-      );
+        body: new URLSearchParams({
+          code,
+          client_id: config.GOOGLE.CLIENT_ID,
+          client_secret: config.GOOGLE.CLIENT_SECRET,
+          redirect_uri: config.GOOGLE.REDIRECT_URI,
+          grant_type: 'authorization_code',
+        }),
+      });
 
       if (!tokenResponse.ok) {
         const errorData = await tokenResponse.json();
@@ -232,7 +234,9 @@ export class AuthService {
       );
 
       if (!userInfoResponse.ok) {
-        throw new UnauthorizedException('Failed to fetch user info from Google');
+        throw new UnauthorizedException(
+          'Failed to fetch user info from Google',
+        );
       }
 
       const googleUserInfo: {
@@ -354,6 +358,109 @@ export class AuthService {
       }
       throw new HttpException(
         'Failed to authenticate with Google',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
+    try {
+      const user = await this.authRepo.findOne({
+        email: forgotPasswordDto.email,
+      });
+
+      // Don't reveal if user exists or not for security reasons
+      if (!user) {
+        // Return success even if user doesn't exist to prevent email enumeration
+        return {
+          success: true,
+          message:
+            'If an account with that email exists, a password reset link has been sent.',
+        };
+      }
+
+      // Check if user requires password (not OAuth-only users)
+      if (!user.requires_password) {
+        return {
+          success: true,
+          message:
+            'If an account with that email exists, a password reset link has been sent.',
+        };
+      }
+
+      // Generate JWT reset token with user ID, expires in 1 hour
+      const resetToken = this.jwtService.sign(
+        { id: user.id, email: user.email, type: 'password_reset' },
+        { expiresIn: '1h' },
+      );
+
+      // Send reset email
+      await this.emailService.sendPasswordResetEmail(user.email, resetToken);
+
+      return {
+        success: true,
+        message:
+          'If an account with that email exists, a password reset link has been sent.',
+      };
+    } catch (error) {
+      console.error('Forgot password error:', error);
+      throw new HttpException(
+        'Failed to process password reset request',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  async resetPassword(resetPasswordDto: ResetPasswordDto) {
+    try {
+      // Verify and decode the JWT token
+      let decoded: any;
+      try {
+        decoded = this.jwtService.verify(resetPasswordDto.token);
+      } catch (error) {
+        throw new BadRequestException('Invalid or expired reset token');
+      }
+
+      // Verify token type
+      if (decoded.type !== 'password_reset') {
+        throw new BadRequestException('Invalid reset token');
+      }
+
+      // Find user by ID from token
+      const user = await this.authRepo.findOne({ id: decoded.id });
+
+      if (!user) {
+        throw new BadRequestException('User not found');
+      }
+
+      // Check if user requires password (not OAuth-only users)
+      if (!user.requires_password) {
+        throw new BadRequestException(
+          'Password reset is not available for this account',
+        );
+      }
+
+      // Hash new password
+      const hashedPassword = await hashPassword(resetPasswordDto.password);
+
+      // Update user password
+      user.password = hashedPassword;
+      await this.authRepo.save(user);
+
+      return {
+        success: true,
+        message: 'Password has been reset successfully',
+      };
+    } catch (error) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException
+      ) {
+        throw error;
+      }
+      console.error('Reset password error:', error);
+      throw new HttpException(
+        'Failed to reset password',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
