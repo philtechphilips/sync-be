@@ -13,6 +13,9 @@ export const datasourceOptions: DataSourceOptions = {
     trustServerCertificate: true,
   },
   migrations: ['dist/database/migrations/*.js'],
+  ssl: {
+    rejectUnauthorized: false,
+  },
 };
 
 const dataSource = new DataSource(datasourceOptions);
