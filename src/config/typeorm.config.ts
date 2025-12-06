@@ -3,11 +3,7 @@ import { DataSource, DataSourceOptions } from 'typeorm';
 
 export const datasourceOptions: DataSourceOptions = {
   type: 'postgres',
-  host: config.DB.HOST,
-  port: config.DB.PORT,
-  username: config.DB.USER,
-  password: config.DB.PASSWORD,
-  database: config.DB.NAME,
+  url: config.DB.URL,
   entities: ['dist/**/*.entity.js'],
   extra: {
     trustServerCertificate: true,

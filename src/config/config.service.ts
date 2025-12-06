@@ -10,11 +10,7 @@ const schema = joi
       .string()
       .valid('development', 'production', 'staging')
       .required(),
-    DATABASE_HOST: joi.string().required(),
-    DATABASE_PORT: joi.string().required(),
-    DATABASE_USERNAME: joi.string().required(),
-    DATABASE_PASSWORD: joi.string().required(),
-    DATABASE_NAME: joi.string().required(),
+    DATABASE_URL: joi.string().required(),
     JWTSECRET: joi.string().required(),
     JWT_REFRESH_SECRET: joi.string().optional(),
     JWT_ACCESS_EXPIRATION: joi.string().default('15m'),
@@ -49,11 +45,7 @@ export const config = {
     REFRESH_EXPIRATION: envVars.JWT_REFRESH_EXPIRATION || '7d',
   },
   DB: {
-    PORT: Number(envVars.DATABASE_PORT),
-    HOST: envVars.DATABASE_HOST,
-    USER: envVars.DATABASE_USERNAME,
-    PASSWORD: envVars.DATABASE_PASSWORD,
-    NAME: envVars.DATABASE_NAME,
+    URL: envVars.DATABASE_URL,
     TRIPS_NAME: envVars.DATABASE_TRIPS_NAME,
   },
   GOOGLE: {
