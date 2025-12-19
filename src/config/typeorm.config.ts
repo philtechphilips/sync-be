@@ -4,7 +4,6 @@ import { DataSource, DataSourceOptions } from 'typeorm';
 export const datasourceOptions: DataSourceOptions = {
   type: 'postgres',
   url: config.DB.URL,
-
   entities: ['dist/**/*.entity.js'],
   migrations: ['dist/database/migrations/*.js'],
   ssl: {
