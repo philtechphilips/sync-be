@@ -5,12 +5,14 @@ import { AppService } from './app.service';
 import { datasourceOptions } from './config/typeorm.config';
 import { AuthModule } from './auth/auth.module';
 import { WorkspaceModule } from './workspace/workspace.module';
+import { AdminOnboardingModule } from './admin-onboarding/admin-onboarding.module';
 
 @Module({
   imports: [
     TypeOrmModule.forRoot(datasourceOptions),
     AuthModule,
     WorkspaceModule,
+    AdminOnboardingModule,
   ],
   controllers: [AppController],
   providers: [AppService],

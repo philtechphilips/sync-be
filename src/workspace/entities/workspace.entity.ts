@@ -43,6 +43,9 @@ export class Workspace {
   @Column({ default: 'light' })
   theme: string;
 
+  @Column({ name: 'onboarding_plan', nullable: false, default: 'starter' })
+  onboarding_plan: string;
+
   @Column({ name: 'created_by', nullable: true })
   created_by: string;
 
