@@ -84,7 +84,9 @@ export class ClustersService {
         await connection.end();
         return { success: true, message: 'MySQL connection successful!' };
       } catch (error) {
-        throw new BadRequestException(`MySQL connection failed: ${error.message}`);
+        throw new BadRequestException(
+          `MySQL connection failed: ${error.message}`,
+        );
       }
     } else if (type === ClusterType.POSTGRES) {
       const client = new PGClient({
@@ -101,7 +103,9 @@ export class ClustersService {
         await client.end();
         return { success: true, message: 'PostgreSQL connection successful!' };
       } catch (error) {
-        throw new BadRequestException(`PostgreSQL connection failed: ${error.message}`);
+        throw new BadRequestException(
+          `PostgreSQL connection failed: ${error.message}`,
+        );
       }
     }
 
@@ -129,12 +133,16 @@ export class ClustersService {
         const pool = this.getMySQLPool(cluster);
         const [rows]: [any[], any] = await pool.query(
           'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ?',
-          [database, 'BASE TABLE']
+          [database, 'BASE TABLE'],
         );
-        return rows.map((row: any) => ({ name: row.TABLE_NAME || row.table_name }));
+        return rows.map((row: any) => ({
+          name: row.TABLE_NAME || row.table_name,
+        }));
       } catch (error) {
         console.error('findTables MySQL error:', error);
-        throw new BadRequestException(`Failed to fetch MySQL tables: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to fetch MySQL tables: ${error.message}`,
+        );
       }
     } else if (type === ClusterType.POSTGRES) {
       try {
@@ -145,7 +153,9 @@ export class ClustersService {
         return res.rows.map((row: any) => ({ name: row.table_name }));
       } catch (error) {
         console.error('findTables error:', error);
-        throw new BadRequestException(`Failed to fetch PostgreSQL tables: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to fetch PostgreSQL tables: ${error.message}`,
+        );
       }
     }
   }
@@ -163,27 +173,37 @@ export class ClustersService {
         const pool = this.getMySQLPool(cluster);
         const [rows]: [any[], any] = await pool.query(
           'SELECT COLUMN_NAME as name, DATA_TYPE as type, IS_NULLABLE as nullable, COLUMN_DEFAULT as defaultValue, COLUMN_KEY as columnKey FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
-          [database, tableName]
+          [database, tableName],
         );
         return rows;
       } catch (error) {
-        throw new BadRequestException(`Failed to fetch MySQL columns: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to fetch MySQL columns: ${error.message}`,
+        );
       }
     } else if (type === ClusterType.POSTGRES) {
       try {
         const pool = this.getPGPool(cluster);
         const res = await pool.query(
           "SELECT column_name as name, data_type as type, is_nullable as nullable, column_default as defaultValue FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1",
-          [tableName]
+          [tableName],
         );
         return res.rows;
       } catch (error) {
-        throw new BadRequestException(`Failed to fetch PostgreSQL columns: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to fetch PostgreSQL columns: ${error.message}`,
+        );
       }
     }
   }
 
-  async findTableData(id: string, userId: string, tableName: string, page: number = 1, limit: number = 100) {
+  async findTableData(
+    id: string,
+    userId: string,
+    tableName: string,
+    page: number = 1,
+    limit: number = 100,
+  ) {
     const cluster = await this.findOne(id, userId);
     const { type } = cluster;
     const offset = (page - 1) * limit;
@@ -198,24 +218,28 @@ export class ClustersService {
         const pool = this.getMySQLPool(cluster);
         const [rows] = await pool.query(
           `SELECT * FROM \`${tableName}\` LIMIT ? OFFSET ?`,
-          [limit, offset]
+          [limit, offset],
         );
         return rows;
       } catch (error) {
         console.error('findTableData MySQL error:', error);
-        throw new BadRequestException(`Failed to fetch MySQL data: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to fetch MySQL data: ${error.message}`,
+        );
       }
     } else if (type === ClusterType.POSTGRES) {
       try {
         const pool = this.getPGPool(cluster);
         const res = await pool.query(
-          `SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`, 
-          [limit, offset]
+          `SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`,
+          [limit, offset],
         );
         return res.rows;
       } catch (error) {
         console.error('findTableData PostgreSQL error:', error);
-        throw new BadRequestException(`Failed to fetch PostgreSQL data: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to fetch PostgreSQL data: ${error.message}`,
+        );
       }
     }
 
@@ -287,7 +311,12 @@ export class ClustersService {
     }
   }
 
-  async insertTableData(id: string, userId: string, tableName: string, data: any) {
+  async insertTableData(
+    id: string,
+    userId: string,
+    tableName: string,
+    data: any,
+  ) {
     const cluster = await this.findOne(id, userId);
     const { type } = cluster;
 
@@ -297,7 +326,7 @@ export class ClustersService {
 
     const keys = Object.keys(data);
     const values = Object.values(data);
-    
+
     if (keys.length === 0) {
       throw new BadRequestException('No data provided for insertion');
     }
@@ -305,33 +334,42 @@ export class ClustersService {
     if (type === ClusterType.MYSQL) {
       try {
         const pool = this.getMySQLPool(cluster);
-        const columnNames = keys.map(k => `\`${k}\``).join(', ');
+        const columnNames = keys.map((k) => `\`${k}\``).join(', ');
         const placeholders = keys.map(() => '?').join(', ');
         const [result] = await pool.query(
           `INSERT INTO \`${tableName}\` (${columnNames}) VALUES (${placeholders})`,
-          values
+          values,
         );
         return result;
       } catch (error) {
-        throw new BadRequestException(`Failed to insert MySQL data: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to insert MySQL data: ${error.message}`,
+        );
       }
     } else if (type === ClusterType.POSTGRES) {
       try {
         const pool = this.getPGPool(cluster);
-        const columnNames = keys.map(k => `"${k}"`).join(', ');
+        const columnNames = keys.map((k) => `"${k}"`).join(', ');
         const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
         const res = await pool.query(
           `INSERT INTO "${tableName}" (${columnNames}) VALUES (${placeholders}) RETURNING *`,
-          values
+          values,
         );
         return res.rows[0];
       } catch (error) {
-        throw new BadRequestException(`Failed to insert PostgreSQL data: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to insert PostgreSQL data: ${error.message}`,
+        );
       }
     }
   }
 
-  async deleteTableData(id: string, userId: string, tableName: string, where: any) {
+  async deleteTableData(
+    id: string,
+    userId: string,
+    tableName: string,
+    where: any,
+  ) {
     const cluster = await this.findOne(id, userId);
     const { type } = cluster;
 
@@ -341,13 +379,18 @@ export class ClustersService {
 
     const whereKeys = Object.keys(where);
     if (whereKeys.length === 0) {
-      throw new BadRequestException('Delete operation requires conditions to prevent accidental full table wipe');
+      throw new BadRequestException(
+        'Delete operation requires conditions to prevent accidental full table wipe',
+      );
     }
 
     const whereClause = whereKeys
-      .map((key, i) => `${type === ClusterType.MYSQL ? `\`${key}\`` : `"${key}"`} = ${type === ClusterType.MYSQL ? '?' : `$${i + 1}`}`)
+      .map(
+        (key, i) =>
+          `${type === ClusterType.MYSQL ? `\`${key}\`` : `"${key}"`} = ${type === ClusterType.MYSQL ? '?' : `$${i + 1}`}`,
+      )
       .join(' AND ');
-    
+
     const values = Object.values(where);
 
     if (type === ClusterType.MYSQL) {
@@ -355,22 +398,26 @@ export class ClustersService {
         const pool = this.getMySQLPool(cluster);
         const [result] = await pool.query(
           `DELETE FROM \`${tableName}\` WHERE ${whereClause}`,
-          values
+          values,
         );
         return result;
       } catch (error) {
-        throw new BadRequestException(`Failed to delete MySQL data: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to delete MySQL data: ${error.message}`,
+        );
       }
     } else if (type === ClusterType.POSTGRES) {
       try {
         const pool = this.getPGPool(cluster);
         const res = await pool.query(
           `DELETE FROM "${tableName}" WHERE ${whereClause}`,
-          values
+          values,
         );
         return res.rowCount;
       } catch (error) {
-        throw new BadRequestException(`Failed to delete PostgreSQL data: ${error.message}`);
+        throw new BadRequestException(
+          `Failed to delete PostgreSQL data: ${error.message}`,
+        );
       }
     }
   }

@@ -28,7 +28,10 @@ export class ClustersController {
 
   @Post()
   @UsePipes(ValidationPipe)
-  async create(@Request() req: any, @Body() createClusterDto: CreateClusterDto) {
+  async create(
+    @Request() req: any,
+    @Body() createClusterDto: CreateClusterDto,
+  ) {
     return this.clustersService.create(req.user.id, createClusterDto);
   }
 
@@ -81,7 +84,12 @@ export class ClustersController {
     @Param('tableName') tableName: string,
     @Body() data: any,
   ) {
-    return this.clustersService.insertTableData(id, req.user.id, tableName, data);
+    return this.clustersService.insertTableData(
+      id,
+      req.user.id,
+      tableName,
+      data,
+    );
   }
 
   @Patch(':id/tables/:tableName/rows')
