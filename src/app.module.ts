@@ -5,10 +5,7 @@ import { AppService } from './app.service';
 import { datasourceOptions } from './config/typeorm.config';
 import { AuthModule } from './auth/auth.module';
 @Module({
-  imports: [
-    TypeOrmModule.forRoot(datasourceOptions),
-    AuthModule,
-  ],
+  imports: [TypeOrmModule.forRoot(datasourceOptions), AuthModule],
   controllers: [AppController],
   providers: [AppService],
 })

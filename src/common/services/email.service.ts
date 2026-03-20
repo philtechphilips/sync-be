@@ -39,7 +39,7 @@ export class EmailService {
     const resetUrl = `${config.FRONTEND_URL}/auth/reset-password?token=${resetToken}`;
 
     const mailOptions = {
-      from: `"Groom API" <${config.SMTP.FROM}>`,
+      from: `"SynqDB" <${config.SMTP.FROM}>`,
       to: email,
       subject: 'Password Reset Request',
       html: `
@@ -123,7 +123,7 @@ export class EmailService {
     const invitationUrl = `${config.FRONTEND_URL}/workspace/accept-invitation?token=${invitationToken}`;
 
     const mailOptions = {
-      from: `"Groom API" <${config.SMTP.FROM}>`,
+      from: `"SynqDB" <${config.SMTP.FROM}>`,
       to: email,
       subject: `You've been invited to join ${workspaceName}`,
       html: `
