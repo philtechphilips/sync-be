@@ -2,13 +2,15 @@ import { config } from 'src/config/config.service';
 import { DataSource, DataSourceOptions } from 'typeorm';
 
 export const datasourceOptions: DataSourceOptions = {
-  type: 'postgres',
-  url: config.DB.URL,
+  type: 'mysql',
+  host: config.DB.HOST,
+  port: config.DB.PORT,
+  username: config.DB.USERNAME,
+  password: config.DB.PASSWORD,
+  database: config.DB.NAME,
   entities: ['dist/**/*.entity.js'],
   migrations: ['dist/database/migrations/*.js'],
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  synchronize: true,
 };
 
 const dataSource = new DataSource(datasourceOptions);

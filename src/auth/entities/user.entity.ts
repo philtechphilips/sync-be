@@ -26,16 +26,16 @@ export class User {
   @Column({ default: 'user' })
   role: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'text', nullable: true })
   access_token: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'text', nullable: true })
   refresh_token: string;
 
   @Column({ type: 'timestamp', nullable: true })
   refresh_token_expiry: Date;
 
-  @Column({ nullable: true })
+  @Column({ type: 'text', nullable: true })
   profile_picture: string;
 
   @Column({ nullable: true, default: 'local' })

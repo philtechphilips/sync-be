@@ -43,13 +43,25 @@ export class AuthService {
 
       // Generate access token
       const accessToken = this.jwtService.sign(
-        { id: user.id, email: user.email, role: user.role },
+        { 
+          id: user.id, 
+          email: user.email, 
+          role: user.role,
+          full_name: user.full_name,
+          profile_picture: user.profile_picture 
+        },
         { expiresIn: config.JWT.ACCESS_EXPIRATION },
       );
 
       // Generate refresh token
       const refreshToken = this.jwtService.sign(
-        { id: user.id, email: user.email, role: user.role },
+        { 
+          id: user.id, 
+          email: user.email, 
+          role: user.role,
+          full_name: user.full_name,
+          profile_picture: user.profile_picture 
+        },
         {
           secret: config.JWT.REFRESH_SECRET,
           expiresIn: config.JWT.REFRESH_EXPIRATION,
@@ -106,13 +118,25 @@ export class AuthService {
 
       // Generate new access token
       const accessToken = this.jwtService.sign(
-        { id: user.id, email: user.email, role: user.role },
+        { 
+          id: user.id, 
+          email: user.email, 
+          role: user.role,
+          full_name: user.full_name,
+          profile_picture: user.profile_picture 
+        },
         { expiresIn: config.JWT.ACCESS_EXPIRATION },
       );
 
       // Generate new refresh token
       const newRefreshToken = this.jwtService.sign(
-        { id: user.id, email: user.email, role: user.role },
+        { 
+          id: user.id, 
+          email: user.email, 
+          role: user.role,
+          full_name: user.full_name,
+          profile_picture: user.profile_picture 
+        },
         {
           secret: config.JWT.REFRESH_SECRET,
           expiresIn: config.JWT.REFRESH_EXPIRATION,
@@ -315,13 +339,25 @@ export class AuthService {
 
       // Generate access token
       const accessToken = this.jwtService.sign(
-        { id: user.id, email: user.email, role: user.role },
+        { 
+          id: user.id, 
+          email: user.email, 
+          role: user.role,
+          full_name: user.full_name,
+          profile_picture: user.profile_picture 
+        },
         { expiresIn: config.JWT.ACCESS_EXPIRATION },
       );
 
       // Generate refresh token
       const refreshToken = this.jwtService.sign(
-        { id: user.id, email: user.email, role: user.role },
+        { 
+          id: user.id, 
+          email: user.email, 
+          role: user.role,
+          full_name: user.full_name,
+          profile_picture: user.profile_picture 
+        },
         {
           secret: config.JWT.REFRESH_SECRET,
           expiresIn: config.JWT.REFRESH_EXPIRATION,
