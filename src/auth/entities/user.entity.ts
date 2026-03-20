@@ -4,7 +4,9 @@ import {
   PrimaryGeneratedColumn,
   CreateDateColumn,
   UpdateDateColumn,
+  OneToMany,
 } from 'typeorm';
+import { Cluster } from '../../clusters/entities/cluster.entity';
 
 @Entity({ name: 'auth_users' })
 export class User {
@@ -43,6 +45,9 @@ export class User {
 
   @Column({ nullable: true })
   google_id: string;
+
+  @OneToMany(() => Cluster, (cluster) => cluster.user)
+  clusters: Cluster[];
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

@@ -4,8 +4,14 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { datasourceOptions } from './config/typeorm.config';
 import { AuthModule } from './auth/auth.module';
+import { ClustersModule } from './clusters/clusters.module';
+
 @Module({
-  imports: [TypeOrmModule.forRoot(datasourceOptions), AuthModule],
+  imports: [
+    TypeOrmModule.forRoot(datasourceOptions),
+    AuthModule,
+    ClustersModule,
+  ],
   controllers: [AppController],
   providers: [AppService],
 })

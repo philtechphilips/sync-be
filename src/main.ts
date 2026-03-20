@@ -18,15 +18,15 @@ async function bootstrap() {
     credentials: true,
   });
 
-  app.use(
-    rateLimit({
-      windowMs: 15 * 60 * 1000,
-      max: 100,
-      standardHeaders: true,
-      legacyHeaders: false,
-      message: 'Too many requests from this IP, please try again later.',
-    }),
-  );
+  // app.use(
+  //   rateLimit({
+  //     windowMs: 15 * 60 * 1000,
+  //     max: 10000,
+  //     standardHeaders: true,
+  //     legacyHeaders: false,
+  //     message: 'Too many requests from this IP, please try again later.',
+  //   }),
+  // );
 
   await app.listen(config.PORT.APP_PORT, () => {
     logger.log(`Server started on ${config.PORT.APP_PORT}`);
