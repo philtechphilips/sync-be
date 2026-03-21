@@ -72,13 +72,24 @@ export class ClustersController {
     @Param('tableName') tableName: string,
     @Query('page') page: string,
     @Query('limit') limit: string,
+    @Query('filters') filters: string,
   ) {
+    let parsedFilters = [];
+    if (filters) {
+      try {
+        parsedFilters = JSON.parse(filters);
+      } catch (e) {
+        console.error('Failed to parse filters:', e);
+      }
+    }
+
     return this.clustersService.findTableData(
       id,
       req.user.id,
       tableName,
       page ? parseInt(page) : 1,
       limit ? parseInt(limit) : 100,
+      parsedFilters,
     );
   }
 

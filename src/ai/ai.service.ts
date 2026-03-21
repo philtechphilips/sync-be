@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import OpenAI from 'openai';
 import { ClustersService } from '../clusters/clusters.service';
+import { ClusterType } from '../clusters/entities/cluster.entity';
 
 @Injectable()
 export class AIService {
@@ -13,16 +14,16 @@ export class AIService {
   }
 
   async generateSQL(clusterId: string, userId: string, prompt: string) {
+    const cluster = await this.clustersService.findOne(clusterId, userId);
     const rawSchema = await this.clustersService.getSchema(clusterId, userId);
     const compactSchema = this.getCompressedSchema(rawSchema);
 
     const response = await this.openai.chat.completions.create({
-      model: 'gpt-4o-mini', // Use mini for high TPM limits and efficiency
+      model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content:
-            'You are a professional SQL expert. Generate valid SQL code based on the provided schema tables and prompt. Only return raw SQL. No explanations, no markdown blocks. Just the SQL.',
+          content: `You are a professional SQL expert. Generate valid SQL code for ${cluster.type} database based on the provided schema. Only return raw SQL. No explanations, no markdown blocks. Just the SQL. Use ${cluster.type === ClusterType.MSSQL ? 'T-SQL' : cluster.type} syntax.`,
         },
         {
           role: 'user',
@@ -55,6 +56,7 @@ export class AIService {
   }
 
   async optimizeSQL(clusterId: string, userId: string, sql: string) {
+    const cluster = await this.clustersService.findOne(clusterId, userId);
     const rawSchema = await this.clustersService.getSchema(clusterId, userId);
     const compactSchema = this.getCompressedSchema(rawSchema);
 
@@ -63,8 +65,7 @@ export class AIService {
       messages: [
         {
           role: 'system',
-          content:
-            'You are a database performance tuner. Suggest code optimizations and indexing strategies based on the schema and query structure. Be concise and technical.',
+          content: `You are a database performance tuner for ${cluster.type}. Suggest code optimizations and indexing strategies specific to ${cluster.type === ClusterType.MSSQL ? 'SQL Server' : cluster.type}. Be concise and technical.`,
         },
         {
           role: 'user',

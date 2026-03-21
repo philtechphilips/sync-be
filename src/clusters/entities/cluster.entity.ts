@@ -12,6 +12,7 @@ import { User } from '../../auth/entities/user.entity';
 export enum ClusterType {
   MYSQL = 'mysql',
   POSTGRES = 'postgres',
+  MSSQL = 'mssql',
 }
 
 @Entity('clusters')
