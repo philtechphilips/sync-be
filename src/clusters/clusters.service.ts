@@ -63,7 +63,10 @@ export class ClustersService {
 
       // Add error listener to handle unexpected connection drops
       pool.on('error', (err: any) => {
-        console.error(`Unexpected error on idle client for cluster ${id}:`, err);
+        console.error(
+          `Unexpected error on idle client for cluster ${id}:`,
+          err,
+        );
       });
 
       this.pgPools.set(id, pool);
@@ -158,9 +161,15 @@ export class ClustersService {
       ...createClusterDto,
       name: this.cryptographyService.encrypt(createClusterDto.name) as string,
       host: this.cryptographyService.encrypt(createClusterDto.host) as string,
-      username: this.cryptographyService.encrypt(createClusterDto.username) as string,
-      password: this.cryptographyService.encrypt(createClusterDto.password) ?? undefined,
-      database: this.cryptographyService.encrypt(createClusterDto.database) as string,
+      username: this.cryptographyService.encrypt(
+        createClusterDto.username,
+      ) as string,
+      password:
+        this.cryptographyService.encrypt(createClusterDto.password) ??
+        undefined,
+      database: this.cryptographyService.encrypt(
+        createClusterDto.database,
+      ) as string,
       userId,
     });
 

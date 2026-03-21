@@ -12,7 +12,10 @@ export class CryptographyService {
     try {
       const iv = crypto.randomBytes(12); // GCM recommends 12 bytes IV
       const cipher = crypto.createCipheriv(this.algorithm, this.key, iv);
-      const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+      const encrypted = Buffer.concat([
+        cipher.update(text, 'utf8'),
+        cipher.final(),
+      ]);
       const authTag = cipher.getAuthTag();
       return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
     } catch (error) {
@@ -31,10 +34,13 @@ export class CryptographyService {
       const iv = Buffer.from(ivHex, 'hex');
       const authTag = Buffer.from(authTagHex, 'hex');
       const encrypted = Buffer.from(encryptedHex, 'hex');
-      
+
       const decipher = crypto.createDecipheriv(this.algorithm, this.key, iv);
       decipher.setAuthTag(authTag);
-      const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+      const decrypted = Buffer.concat([
+        decipher.update(encrypted),
+        decipher.final(),
+      ]);
       return decrypted.toString('utf8');
     } catch (error) {
       console.error('Decryption failed:', error);
