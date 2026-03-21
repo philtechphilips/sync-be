@@ -15,37 +15,40 @@ export class AIService {
   async generateSQL(clusterId: string, userId: string, prompt: string) {
     const rawSchema = await this.clustersService.getSchema(clusterId, userId);
     const compactSchema = this.getCompressedSchema(rawSchema);
-    
+
     const response = await this.openai.chat.completions.create({
-      model: "gpt-4o-mini", // Use mini for high TPM limits and efficiency
+      model: 'gpt-4o-mini', // Use mini for high TPM limits and efficiency
       messages: [
-        { 
-          role: "system", 
-          content: "You are a professional SQL expert. Generate valid SQL code based on the provided schema tables and prompt. Only return raw SQL. No explanations, no markdown blocks. Just the SQL." 
+        {
+          role: 'system',
+          content:
+            'You are a professional SQL expert. Generate valid SQL code based on the provided schema tables and prompt. Only return raw SQL. No explanations, no markdown blocks. Just the SQL.',
         },
-        { 
-          role: "user", 
-          content: `Schema: ${compactSchema}\n\nObjective: "${prompt}"` 
-        }
-      ]
+        {
+          role: 'user',
+          content: `Schema: ${compactSchema}\n\nObjective: "${prompt}"`,
+        },
+      ],
     });
 
-    return response.choices[0].message.content?.trim().replace(/```sql|```/g, '');
+    return response.choices[0].message.content
+      ?.trim()
+      .replace(/```sql|```/g, '');
   }
 
   async explainSQL(sql: string, mode: 'simple' | 'advanced') {
     const response = await this.openai.chat.completions.create({
-      model: "gpt-4o",
+      model: 'gpt-4o',
       messages: [
-        { 
-          role: "system", 
-          content: `You are a database consultant. Explain the provided SQL query in ${mode} terms. ${mode === 'simple' ? 'Avoid technical jargon.' : 'Include technical details like joins and aggregation logic.'}`
+        {
+          role: 'system',
+          content: `You are a database consultant. Explain the provided SQL query in ${mode} terms. ${mode === 'simple' ? 'Avoid technical jargon.' : 'Include technical details like joins and aggregation logic.'}`,
         },
-        { 
-          role: "user", 
-          content: `Query: ${sql}` 
-        }
-      ]
+        {
+          role: 'user',
+          content: `Query: ${sql}`,
+        },
+      ],
     });
 
     return response.choices[0].message.content;
@@ -56,17 +59,18 @@ export class AIService {
     const compactSchema = this.getCompressedSchema(rawSchema);
 
     const response = await this.openai.chat.completions.create({
-      model: "gpt-4o",
+      model: 'gpt-4o',
       messages: [
-        { 
-          role: "system", 
-          content: "You are a database performance tuner. Suggest code optimizations and indexing strategies based on the schema and query structure. Be concise and technical." 
+        {
+          role: 'system',
+          content:
+            'You are a database performance tuner. Suggest code optimizations and indexing strategies based on the schema and query structure. Be concise and technical.',
         },
-        { 
-          role: "user", 
-          content: `Schema: ${compactSchema}\n\nQuery to optimize: ${sql}` 
-        }
-      ]
+        {
+          role: 'user',
+          content: `Schema: ${compactSchema}\n\nQuery to optimize: ${sql}`,
+        },
+      ],
     });
 
     return response.choices[0].message.content;
@@ -80,20 +84,24 @@ export class AIService {
     const tables: Record<string, string[]> = {};
     const fks: string[] = [];
 
-    rawSchema.forEach(row => {
+    rawSchema.forEach((row) => {
       const table = row.tableName;
       if (!tables[table]) tables[table] = [];
       tables[table].push(`${row.name}(${row.type})`);
-      
+
       if (row.referencedTable) {
-        fks.push(`${table}.${row.name} -> ${row.referencedTable}.${row.referencedColumn}`);
+        fks.push(
+          `${table}.${row.name} -> ${row.referencedTable}.${row.referencedColumn}`,
+        );
       }
     });
 
-    console.log(rawSchema)
+    console.log(rawSchema);
 
-    return Object.entries(tables)
-      .map(([name, cols]) => `Table ${name} [${cols.join(', ')}]`)
-      .join('; ') + (fks.length > 0 ? ` | Relations: ${fks.join(', ')}` : '');
+    return (
+      Object.entries(tables)
+        .map(([name, cols]) => `Table ${name} [${cols.join(', ')}]`)
+        .join('; ') + (fks.length > 0 ? ` | Relations: ${fks.join(', ')}` : '')
+    );
   }
 }
