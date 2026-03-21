@@ -701,7 +701,7 @@ export class ClustersService {
   async executeQuery(id: string, userId: string, query: string) {
     const cluster = await this.findOne(id, userId);
     const { type } = cluster;
-    
+
     const startTime = Date.now();
     let success = true;
     let errorMessage = null;
