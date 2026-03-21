@@ -363,6 +363,83 @@ export class ClustersService {
     }
   }
 
+  async getSchema(id: string, userId: string) {
+    const cluster = await this.findOne(id, userId);
+    const { type, database } = cluster;
+
+    if (type === ClusterType.MYSQL) {
+      try {
+        const pool = this.getMySQLPool(cluster);
+        const [rows]: [any[], any] = await pool.query(
+          `SELECT 
+            cols.TABLE_NAME as tableName,
+            cols.COLUMN_NAME as name, 
+            cols.DATA_TYPE as type, 
+            cols.COLUMN_TYPE as fullType, 
+            cols.IS_NULLABLE as nullable, 
+            cols.COLUMN_DEFAULT as defaultValue, 
+            cols.COLUMN_KEY as columnKey,
+            fk.referencedTable,
+            fk.referencedColumn
+          FROM information_schema.columns cols
+          LEFT JOIN (
+            SELECT 
+                TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, 
+                REFERENCED_TABLE_NAME as referencedTable, 
+                REFERENCED_COLUMN_NAME as referencedColumn
+            FROM information_schema.KEY_COLUMN_USAGE 
+            WHERE REFERENCED_TABLE_NAME IS NOT NULL
+            GROUP BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
+          ) fk 
+            ON cols.TABLE_SCHEMA = fk.TABLE_SCHEMA 
+            AND cols.TABLE_NAME = fk.TABLE_NAME 
+            AND cols.COLUMN_NAME = fk.COLUMN_NAME 
+          WHERE cols.table_schema = ?`,
+          [database],
+        );
+        return rows;
+      } catch (error) {
+        throw new BadRequestException(
+          `Failed to fetch MySQL schema: ${error.message}`,
+        );
+      }
+    } else if (type === ClusterType.POSTGRES) {
+      try {
+        const pool = this.getPGPool(cluster);
+        const res = await pool.query(
+          `SELECT DISTINCT ON (cols.table_name, cols.ordinal_position)
+            cols.table_name as "tableName",
+            cols.column_name as name, 
+            cols.data_type as type, 
+            cols.is_nullable as nullable, 
+            cols.column_default as "defaultValue",
+            cols.udt_name as "udtName",
+            kcu.referenced_table_name as "referencedTable",
+            kcu.referenced_column_name as "referencedColumn"
+          FROM information_schema.columns cols
+          LEFT JOIN (
+              SELECT 
+                  kcu.table_name, 
+                  kcu.column_name, 
+                  ccu.table_name AS referenced_table_name, 
+                  ccu.column_name AS referenced_column_name 
+              FROM information_schema.key_column_usage kcu
+              JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name
+              JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name
+              WHERE tc.constraint_type = 'FOREIGN KEY'
+          ) kcu ON cols.table_name = kcu.table_name AND cols.column_name = kcu.column_name
+          WHERE cols.table_schema = 'public'
+          ORDER BY cols.table_name, cols.ordinal_position`,
+        );
+        return res.rows;
+      } catch (error) {
+        throw new BadRequestException(
+          `Failed to fetch PostgreSQL schema: ${error.message}`,
+        );
+      }
+    }
+  }
+
   private async executePaginatedQuery(
     cluster: Cluster,
     tableName: string,

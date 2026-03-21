@@ -60,6 +60,11 @@ export class ClustersController {
     return this.clustersService.findTableColumns(id, req.user.id, tableName);
   }
 
+  @Get(':id/schema')
+  async getSchema(@Request() req: any, @Param('id') id: string) {
+    return this.clustersService.getSchema(id, req.user.id);
+  }
+
   @Get(':id/tables/:tableName')
   async findTableData(
     @Request() req: any,
