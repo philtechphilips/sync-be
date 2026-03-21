@@ -15,6 +15,7 @@ const schema = joi
     DB_USERNAME: joi.string().required(),
     DB_PASSWORD: joi.string().allow('').required(),
     DB_NAME: joi.string().required(),
+    DB_ENCRYPTION_KEY: joi.string().required(),
     JWTSECRET: joi.string().required(),
     JWT_REFRESH_SECRET: joi.string().optional(),
     JWT_ACCESS_EXPIRATION: joi.string().default('15m'),
@@ -54,6 +55,7 @@ export const config = {
     USERNAME: envVars.DB_USERNAME,
     PASSWORD: envVars.DB_PASSWORD,
     NAME: envVars.DB_NAME,
+    ENCRYPTION_KEY: envVars.DB_ENCRYPTION_KEY,
   },
   GOOGLE: {
     CLIENT_ID: envVars.GOOGLE_CLIENT_ID,

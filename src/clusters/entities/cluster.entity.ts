@@ -19,7 +19,7 @@ export class Cluster {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column()
+  @Column({ type: 'text' })
   name: string;
 
   @Column({
@@ -29,19 +29,19 @@ export class Cluster {
   })
   type: ClusterType;
 
-  @Column()
+  @Column({ type: 'text' })
   host: string;
 
   @Column({ default: 3306 })
   port: number;
 
-  @Column()
+  @Column({ type: 'text' })
   username: string;
 
   @Column({ type: 'text', nullable: true })
   password: string;
 
-  @Column()
+  @Column({ type: 'text' })
   database: string;
 
   @Column()

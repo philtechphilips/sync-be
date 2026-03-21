@@ -5,6 +5,14 @@ import * as mysql from 'mysql2/promise';
 import { Client as PGClient } from 'pg';
 import { Cluster, ClusterType } from './entities/cluster.entity';
 import { CreateClusterDto } from './dto/create-cluster.dto';
+import { CryptographyService } from '../common/services/cryptography.service';
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  total: number;
+  page: number;
+  limit: number;
+}
 
 @Injectable()
 export class ClustersService {
@@ -14,10 +22,11 @@ export class ClustersService {
   constructor(
     @InjectRepository(Cluster)
     private readonly clusterRepo: Repository<Cluster>,
+    private readonly cryptographyService: CryptographyService,
   ) {}
 
   private getMySQLPool(cluster: Cluster): mysql.Pool {
-    const { id, host, port, username, password, database } = cluster;
+    const { id, host, port, username, database, password } = cluster;
     let pool = this.mysqlPools.get(id);
     if (!pool) {
       pool = mysql.createPool({
@@ -36,7 +45,7 @@ export class ClustersService {
   }
 
   private getPGPool(cluster: Cluster): any {
-    const { id, host, port, username, password, database } = cluster;
+    const { id, host, port, username, database, password } = cluster;
     let pool = this.pgPools.get(id);
     if (!pool) {
       // Lazy load pg to avoid issues if not needed
@@ -49,15 +58,44 @@ export class ClustersService {
         database,
         max: 10,
         idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 2000,
+        connectionTimeoutMillis: 10000,
       });
+
+      // Add error listener to handle unexpected connection drops
+      pool.on('error', (err: any) => {
+        console.error(`Unexpected error on idle client for cluster ${id}:`, err);
+      });
+
       this.pgPools.set(id, pool);
     }
     return pool;
   }
 
+  private decryptCluster(cluster: Cluster): Cluster {
+    if (!cluster) return cluster;
+    const sensitiveFields: (keyof Cluster)[] = [
+      'name',
+      'host',
+      'username',
+      'password',
+      'database',
+    ];
+    sensitiveFields.forEach((field) => {
+      if (typeof cluster[field] === 'string') {
+        (cluster as any)[field] =
+          this.cryptographyService.decrypt(cluster[field] as string) ||
+          cluster[field];
+      }
+    });
+    return cluster;
+  }
+
   async findAll(userId: string) {
-    return this.clusterRepo.find({ where: { userId } });
+    const clusters = await this.clusterRepo.find({
+      where: { userId },
+      order: { createdAt: 'DESC' },
+    });
+    return clusters.map((c) => this.decryptCluster(c));
   }
 
   async findOne(id: string, userId: string) {
@@ -65,7 +103,7 @@ export class ClustersService {
     if (!cluster) {
       throw new BadRequestException('Cluster not found!');
     }
-    return cluster;
+    return this.decryptCluster(cluster);
   }
 
   async testConnection(createClusterDto: CreateClusterDto) {
@@ -118,10 +156,16 @@ export class ClustersService {
 
     const cluster = this.clusterRepo.create({
       ...createClusterDto,
+      name: this.cryptographyService.encrypt(createClusterDto.name) as string,
+      host: this.cryptographyService.encrypt(createClusterDto.host) as string,
+      username: this.cryptographyService.encrypt(createClusterDto.username) as string,
+      password: this.cryptographyService.encrypt(createClusterDto.password) ?? undefined,
+      database: this.cryptographyService.encrypt(createClusterDto.database) as string,
       userId,
     });
 
-    return this.clusterRepo.save(cluster);
+    const saved = await this.clusterRepo.save(cluster);
+    return this.decryptCluster(saved);
   }
 
   async findTables(id: string, userId: string) {
@@ -132,7 +176,7 @@ export class ClustersService {
       try {
         const pool = this.getMySQLPool(cluster);
         const [rows]: [any[], any] = await pool.query(
-          'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ?',
+          'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ? ORDER BY table_name ASC',
           [database, 'BASE TABLE'],
         );
         return rows.map((row: any) => ({
@@ -148,7 +192,7 @@ export class ClustersService {
       try {
         const pool = this.getPGPool(cluster);
         const res = await pool.query(
-          "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
+          "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name ASC",
         );
         return res.rows.map((row: any) => ({ name: row.table_name }));
       } catch (error) {
@@ -172,7 +216,22 @@ export class ClustersService {
       try {
         const pool = this.getMySQLPool(cluster);
         const [rows]: [any[], any] = await pool.query(
-          'SELECT COLUMN_NAME as name, DATA_TYPE as type, IS_NULLABLE as nullable, COLUMN_DEFAULT as defaultValue, COLUMN_KEY as columnKey FROM information_schema.columns WHERE table_schema = ? AND table_name = ?',
+          `SELECT 
+            cols.COLUMN_NAME as name, 
+            cols.DATA_TYPE as type, 
+            cols.COLUMN_TYPE as fullType, 
+            cols.IS_NULLABLE as nullable, 
+            cols.COLUMN_DEFAULT as defaultValue, 
+            cols.COLUMN_KEY as columnKey,
+            fk.REFERENCED_TABLE_NAME as referencedTable,
+            fk.REFERENCED_COLUMN_NAME as referencedColumn
+          FROM information_schema.columns cols
+          LEFT JOIN information_schema.KEY_COLUMN_USAGE fk 
+            ON cols.TABLE_SCHEMA = fk.TABLE_SCHEMA 
+            AND cols.TABLE_NAME = fk.TABLE_NAME 
+            AND cols.COLUMN_NAME = fk.COLUMN_NAME 
+            AND fk.REFERENCED_TABLE_NAME IS NOT NULL
+          WHERE cols.table_schema = ? AND cols.table_name = ?`,
           [database, tableName],
         );
         return rows;
@@ -185,7 +244,28 @@ export class ClustersService {
       try {
         const pool = this.getPGPool(cluster);
         const res = await pool.query(
-          "SELECT column_name as name, data_type as type, is_nullable as nullable, column_default as defaultValue FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1",
+          `SELECT 
+            cols.column_name as name, 
+            cols.data_type as type, 
+            cols.is_nullable as nullable, 
+            cols.column_default as "defaultValue",
+            cols.udt_name as "udtName",
+            (SELECT string_agg(enumlabel, ',') FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = cols.udt_name) as "enumValues",
+            kcu.referenced_table_name as "referencedTable",
+            kcu.referenced_column_name as "referencedColumn"
+          FROM information_schema.columns cols
+          LEFT JOIN (
+              SELECT 
+                  kcu.table_name, 
+                  kcu.column_name, 
+                  ccu.table_name AS referenced_table_name, 
+                  ccu.column_name AS referenced_column_name 
+              FROM information_schema.key_column_usage kcu
+              JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name
+              JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name
+              WHERE tc.constraint_type = 'FOREIGN KEY'
+          ) kcu ON cols.table_name = kcu.table_name AND cols.column_name = kcu.column_name
+          WHERE cols.table_schema = 'public' AND cols.table_name = $1`,
           [tableName],
         );
         return res.rows;
@@ -197,6 +277,48 @@ export class ClustersService {
     }
   }
 
+  private async executePaginatedQuery(
+    cluster: Cluster,
+    tableName: string,
+    page: number,
+    limit: number,
+  ): Promise<PaginatedResponse<any>> {
+    const { type } = cluster;
+    const offset = (page - 1) * limit;
+
+    if (type === ClusterType.MYSQL) {
+      const pool = this.getMySQLPool(cluster);
+      const [rows]: [any[], any] = await pool.query(
+        `SELECT * FROM \`${tableName}\` LIMIT ? OFFSET ?`,
+        [Number(limit), Number(offset)],
+      );
+      const [countResult]: [any[], any] = await pool.query(
+        `SELECT COUNT(*) as total FROM \`${tableName}\``,
+      );
+      return {
+        data: rows,
+        total: Number(countResult[0]?.total || 0),
+        page: Number(page),
+        limit: Number(limit),
+      };
+    } else {
+      const pool = this.getPGPool(cluster);
+      const res = await pool.query(
+        `SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`,
+        [limit, offset],
+      );
+      const countRes = await pool.query(
+        `SELECT COUNT(*) as total FROM "${tableName}"`,
+      );
+      return {
+        data: res.rows,
+        total: parseInt(countRes.rows[0]?.total || '0'),
+        page: Number(page),
+        limit: Number(limit),
+      };
+    }
+  }
+
   async findTableData(
     id: string,
     userId: string,
@@ -205,45 +327,20 @@ export class ClustersService {
     limit: number = 100,
   ) {
     const cluster = await this.findOne(id, userId);
-    const { type } = cluster;
-    const offset = (page - 1) * limit;
 
     // Sanitize table name: only allow alphanumeric and underscores
     if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
       throw new BadRequestException('Invalid table name!');
     }
 
-    if (type === ClusterType.MYSQL) {
-      try {
-        const pool = this.getMySQLPool(cluster);
-        const [rows] = await pool.query(
-          `SELECT * FROM \`${tableName}\` LIMIT ? OFFSET ?`,
-          [limit, offset],
-        );
-        return rows;
-      } catch (error) {
-        console.error('findTableData MySQL error:', error);
-        throw new BadRequestException(
-          `Failed to fetch MySQL data: ${error.message}`,
-        );
-      }
-    } else if (type === ClusterType.POSTGRES) {
-      try {
-        const pool = this.getPGPool(cluster);
-        const res = await pool.query(
-          `SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`,
-          [limit, offset],
-        );
-        return res.rows;
-      } catch (error) {
-        console.error('findTableData PostgreSQL error:', error);
-        throw new BadRequestException(
-          `Failed to fetch PostgreSQL data: ${error.message}`,
-        );
-      }
+    try {
+      return await this.executePaginatedQuery(cluster, tableName, page, limit);
+    } catch (error) {
+      console.error(`findTableData error for ${cluster.type}:`, error);
+      throw new BadRequestException(
+        `Failed to fetch ${cluster.type} data: ${error.message}`,
+      );
     }
-
-    throw new BadRequestException('Invalid database type!');
   }
 
   async updateTableData(
