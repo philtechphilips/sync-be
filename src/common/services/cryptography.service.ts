@@ -44,7 +44,7 @@ export class CryptographyService {
       return decrypted.toString('utf8');
     } catch (error) {
       console.error('Decryption failed:', error);
-      return encryptedText; // Fallback to raw text if decryption fails (for legacy data)
+      throw new Error(`Decryption failed: ${error.message}`);
     }
   }
 }

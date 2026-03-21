@@ -46,6 +46,7 @@ export class ClustersService {
 
   private getPGPool(cluster: Cluster): any {
     const { id, host, port, username, database, password } = cluster;
+    console.log(`[PG CONNECTION DEBUG] host: ${host}, user: ${username}, db: ${database}, passLen: ${password?.length}, passMasked: ${password?.substring(0, 2)}***${password?.substring(password.length - 2)}`);
     let pool = this.pgPools.get(id);
     if (!pool) {
       // Lazy load pg to avoid issues if not needed
@@ -83,14 +84,36 @@ export class ClustersService {
       'password',
       'database',
     ];
-    sensitiveFields.forEach((field) => {
-      if (typeof cluster[field] === 'string') {
-        (cluster as any)[field] =
-          this.cryptographyService.decrypt(cluster[field] as string) ||
-          cluster[field];
-      }
-    });
-    return cluster;
+
+    try {
+      sensitiveFields.forEach((field) => {
+        const value = cluster[field];
+        if (typeof value === 'string' && value !== '') {
+          const parts = value.split(':');
+          // If it looks like encrypted data (3 parts), try to decrypt it
+          if (parts.length === 3) {
+            (cluster as any)[field] = this.cryptographyService.decrypt(value);
+          }
+        }
+      });
+
+      // After decryption attempts, verify essential connection fields are not empty
+      const required = ['host', 'username', 'database'];
+      required.forEach((field) => {
+        if (!cluster[field as keyof Cluster]) {
+          throw new Error(
+            `Connection property '${field}' is missing or corrupted. Please re-add the cluster.`,
+          );
+        }
+      });
+
+      return cluster;
+    } catch (error) {
+      console.error('Cluster decryption/validation failed:', error);
+      throw new BadRequestException(
+        `Failed to unlock cluster credentials: ${error.message}. If you recently changed encryption settings, you may need to recreate the cluster connection.`,
+      );
+    }
   }
 
   async findAll(userId: string) {
