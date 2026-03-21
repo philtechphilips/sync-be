@@ -213,6 +213,47 @@ export class ClustersService {
     }
   }
 
+  private async validateTableExists(cluster: Cluster, tableName: string) {
+    const { type, database } = cluster;
+    if (type === ClusterType.MYSQL) {
+      try {
+        const pool = this.getMySQLPool(cluster);
+        const [rows]: [any[], any] = await pool.query(
+          'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_name = ?',
+          [database, tableName],
+        );
+        if (rows.length === 0) {
+          throw new BadRequestException(
+            `Table '${tableName}' not found in database '${database}'`,
+          );
+        }
+      } catch (error) {
+        if (error instanceof BadRequestException) throw error;
+        throw new BadRequestException(
+          `Failed to validate table existence: ${error.message}`,
+        );
+      }
+    } else if (type === ClusterType.POSTGRES) {
+      try {
+        const pool = this.getPGPool(cluster);
+        const res = await pool.query(
+          "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
+          [tableName],
+        );
+        if (res.rows.length === 0) {
+          throw new BadRequestException(
+            `Table '${tableName}' not found in public schema`,
+          );
+        }
+      } catch (error) {
+        if (error instanceof BadRequestException) throw error;
+        throw new BadRequestException(
+          `Failed to validate table existence: ${error.message}`,
+        );
+      }
+    }
+  }
+
   async findTableColumns(id: string, userId: string, tableName: string) {
     const cluster = await this.findOne(id, userId);
     const { type, database } = cluster;
@@ -220,6 +261,8 @@ export class ClustersService {
     if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
       throw new BadRequestException('Invalid table name!');
     }
+
+    await this.validateTableExists(cluster, tableName);
 
     if (type === ClusterType.MYSQL) {
       try {
@@ -292,6 +335,7 @@ export class ClustersService {
     page: number,
     limit: number,
   ): Promise<PaginatedResponse<any>> {
+    await this.validateTableExists(cluster, tableName);
     const { type } = cluster;
     const offset = (page - 1) * limit;
 
@@ -366,6 +410,8 @@ export class ClustersService {
       throw new BadRequestException('Invalid table name!');
     }
 
+    await this.validateTableExists(cluster, tableName);
+
     const setKeys = Object.keys(data);
     const setClause = setKeys
       .map(
@@ -430,6 +476,8 @@ export class ClustersService {
       throw new BadRequestException('Invalid table name!');
     }
 
+    await this.validateTableExists(cluster, tableName);
+
     const keys = Object.keys(data);
     const values = Object.values(data);
 
@@ -482,6 +530,8 @@ export class ClustersService {
     if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
       throw new BadRequestException('Invalid table name!');
     }
+
+    await this.validateTableExists(cluster, tableName);
 
     const whereKeys = Object.keys(where);
     if (whereKeys.length === 0) {
