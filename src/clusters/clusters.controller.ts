@@ -132,4 +132,18 @@ export class ClustersController {
   async remove(@Request() req: any, @Param('id') id: string) {
     return this.clustersService.remove(id, req.user.id);
   }
+
+  @Post(':id/query')
+  async executeQuery(
+    @Request() req: any,
+    @Param('id') id: string,
+    @Body() body: { query: string },
+  ) {
+    return this.clustersService.executeQuery(id, req.user.id, body.query);
+  }
+
+  @Get(':id/query/logs')
+  async getQueryLogs(@Request() req: any, @Param('id') id: string) {
+    return this.clustersService.getQueryLogs(id, req.user.id);
+  }
 }

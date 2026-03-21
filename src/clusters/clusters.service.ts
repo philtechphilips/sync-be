@@ -2,8 +2,9 @@ import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as mysql from 'mysql2/promise';
-import { Client as PGClient } from 'pg';
+import { Pool, Client, PoolClient } from 'pg';
 import { Cluster, ClusterType } from './entities/cluster.entity';
+import { QueryLog } from './entities/query-log.entity';
 import { CreateClusterDto } from './dto/create-cluster.dto';
 import { CryptographyService } from '../common/services/cryptography.service';
 
@@ -22,6 +23,8 @@ export class ClustersService {
   constructor(
     @InjectRepository(Cluster)
     private readonly clusterRepo: Repository<Cluster>,
+    @InjectRepository(QueryLog)
+    private readonly queryLogRepo: Repository<QueryLog>,
     private readonly cryptographyService: CryptographyService,
   ) {}
 
@@ -33,7 +36,7 @@ export class ClustersService {
         host,
         port,
         user: username,
-        password,
+        password, // Password is already decrypted by decryptCluster
         database,
         waitForConnections: true,
         connectionLimit: 10,
@@ -57,7 +60,7 @@ export class ClustersService {
         host,
         port,
         user: username,
-        password,
+        password, // Password is already decrypted by decryptCluster
         database,
         max: 10,
         idleTimeoutMillis: 30000,
@@ -75,6 +78,12 @@ export class ClustersService {
       this.pgPools.set(id, pool);
     }
     return pool;
+  }
+
+  // Helper to get a single client from the PG pool for raw queries
+  private async getPostgresClient(cluster: Cluster): Promise<PoolClient> {
+    const pool = this.getPGPool(cluster);
+    return pool.connect();
   }
 
   private decryptCluster(cluster: Cluster): Cluster {
@@ -155,7 +164,7 @@ export class ClustersService {
         );
       }
     } else if (type === ClusterType.POSTGRES) {
-      const client = new PGClient({
+      const client = new Client({
         host,
         port,
         user: username,
@@ -687,6 +696,51 @@ export class ClustersService {
         );
       }
     }
+  }
+
+  async executeQuery(id: string, userId: string, query: string) {
+    const cluster = await this.findOne(id, userId);
+    const { type } = cluster;
+    
+    const startTime = Date.now();
+    let success = true;
+    let errorMessage = null;
+    let results = null;
+
+    try {
+      if (type === ClusterType.MYSQL) {
+        const pool = this.getMySQLPool(cluster);
+        const [rows] = await pool.query(query);
+        results = rows;
+      } else {
+        const pool = this.getPGPool(cluster);
+        const res = await pool.query(query);
+        results = res.rows || res;
+      }
+    } catch (error) {
+      success = false;
+      errorMessage = error.message;
+      throw new BadRequestException(`SQL Execution Error: ${error.message}`);
+    } finally {
+      const executionTimeMs = Date.now() - startTime;
+      await this.queryLogRepo.save({
+        query,
+        clusterId: id,
+        userId,
+        success,
+        errorMessage,
+        executionTimeMs,
+      });
+    }
+    return results;
+  }
+
+  async getQueryLogs(clusterId: string, userId: string): Promise<QueryLog[]> {
+    return this.queryLogRepo.find({
+      where: { clusterId, userId },
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
   }
 
   async remove(id: string, userId: string) {
