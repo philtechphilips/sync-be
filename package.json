@@ -44,6 +44,7 @@
     "joi": "^18.0.1",
     "mysql2": "^3.20.0",
     "nodemailer": "^7.0.10",
+    "openai": "^6.32.0",
     "passport-jwt": "^4.0.1",
     "passport-local": "^1.0.0",
     "pg": "^8.20.0",

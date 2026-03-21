@@ -1,0 +1,99 @@
+import { Injectable, BadRequestException } from '@nestjs/common';
+import OpenAI from 'openai';
+import { ClustersService } from '../clusters/clusters.service';
+
+@Injectable()
+export class AIService {
+  private openai: OpenAI;
+
+  constructor(private readonly clustersService: ClustersService) {
+    this.openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+  }
+
+  async generateSQL(clusterId: string, userId: string, prompt: string) {
+    const rawSchema = await this.clustersService.getSchema(clusterId, userId);
+    const compactSchema = this.getCompressedSchema(rawSchema);
+    
+    const response = await this.openai.chat.completions.create({
+      model: "gpt-4o-mini", // Use mini for high TPM limits and efficiency
+      messages: [
+        { 
+          role: "system", 
+          content: "You are a professional SQL expert. Generate valid SQL code based on the provided schema tables and prompt. Only return raw SQL. No explanations, no markdown blocks. Just the SQL." 
+        },
+        { 
+          role: "user", 
+          content: `Schema: ${compactSchema}\n\nObjective: "${prompt}"` 
+        }
+      ]
+    });
+
+    return response.choices[0].message.content?.trim().replace(/```sql|```/g, '');
+  }
+
+  async explainSQL(sql: string, mode: 'simple' | 'advanced') {
+    const response = await this.openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        { 
+          role: "system", 
+          content: `You are a database consultant. Explain the provided SQL query in ${mode} terms. ${mode === 'simple' ? 'Avoid technical jargon.' : 'Include technical details like joins and aggregation logic.'}`
+        },
+        { 
+          role: "user", 
+          content: `Query: ${sql}` 
+        }
+      ]
+    });
+
+    return response.choices[0].message.content;
+  }
+
+  async optimizeSQL(clusterId: string, userId: string, sql: string) {
+    const rawSchema = await this.clustersService.getSchema(clusterId, userId);
+    const compactSchema = this.getCompressedSchema(rawSchema);
+
+    const response = await this.openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        { 
+          role: "system", 
+          content: "You are a database performance tuner. Suggest code optimizations and indexing strategies based on the schema and query structure. Be concise and technical." 
+        },
+        { 
+          role: "user", 
+          content: `Schema: ${compactSchema}\n\nQuery to optimize: ${sql}` 
+        }
+      ]
+    });
+
+    return response.choices[0].message.content;
+  }
+
+  /**
+   * Compresses the flat schema list into a token-efficient text format.
+   * Maps tableName to a concise list of columns and their types.
+   */
+  private getCompressedSchema(rawSchema: any[]): string {
+    const tables: Record<string, string[]> = {};
+    const fks: string[] = [];
+
+    rawSchema.forEach(row => {
+      const table = row.tableName;
+      if (!tables[table]) tables[table] = [];
+      tables[table].push(`${row.name}(${row.type})`);
+      
+      if (row.referencedTable) {
+        fks.push(`${table}.${row.name} -> ${row.referencedTable}.${row.referencedColumn}`);
+      }
+    });
+
+    console.log(rawSchema)
+
+    return Object.entries(tables)
+      .map(([name, cols]) => `Table ${name} [${cols.join(', ')}]`)
+      .join('; ') + (fks.length > 0 ? ` | Relations: ${fks.join(', ')}` : '');
+  }
+}
