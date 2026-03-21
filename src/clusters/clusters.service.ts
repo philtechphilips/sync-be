@@ -46,7 +46,9 @@ export class ClustersService {
 
   private getPGPool(cluster: Cluster): any {
     const { id, host, port, username, database, password } = cluster;
-    console.log(`[PG CONNECTION DEBUG] host: ${host}, user: ${username}, db: ${database}, passLen: ${password?.length}, passMasked: ${password?.substring(0, 2)}***${password?.substring(password.length - 2)}`);
+    console.log(
+      `[PG CONNECTION DEBUG] host: ${host}, user: ${username}, db: ${database}, passLen: ${password?.length}, passMasked: ${password?.substring(0, 2)}***${password?.substring(password.length - 2)}`,
+    );
     let pool = this.pgPools.get(id);
     if (!pool) {
       // Lazy load pg to avoid issues if not needed
@@ -298,15 +300,23 @@ export class ClustersService {
             cols.IS_NULLABLE as nullable, 
             cols.COLUMN_DEFAULT as defaultValue, 
             cols.COLUMN_KEY as columnKey,
-            fk.REFERENCED_TABLE_NAME as referencedTable,
-            fk.REFERENCED_COLUMN_NAME as referencedColumn
+            fk.referencedTable,
+            fk.referencedColumn
           FROM information_schema.columns cols
-          LEFT JOIN information_schema.KEY_COLUMN_USAGE fk 
+          LEFT JOIN (
+            SELECT 
+                TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, 
+                REFERENCED_TABLE_NAME as referencedTable, 
+                REFERENCED_COLUMN_NAME as referencedColumn
+            FROM information_schema.KEY_COLUMN_USAGE 
+            WHERE REFERENCED_TABLE_NAME IS NOT NULL
+            GROUP BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
+          ) fk 
             ON cols.TABLE_SCHEMA = fk.TABLE_SCHEMA 
             AND cols.TABLE_NAME = fk.TABLE_NAME 
             AND cols.COLUMN_NAME = fk.COLUMN_NAME 
-            AND fk.REFERENCED_TABLE_NAME IS NOT NULL
-          WHERE cols.table_schema = ? AND cols.table_name = ?`,
+          WHERE cols.table_schema = ? AND cols.table_name = ?
+          ORDER BY cols.ORDINAL_POSITION`,
           [database, tableName],
         );
         return rows;
@@ -319,7 +329,7 @@ export class ClustersService {
       try {
         const pool = this.getPGPool(cluster);
         const res = await pool.query(
-          `SELECT 
+          `SELECT DISTINCT ON (cols.ordinal_position)
             cols.column_name as name, 
             cols.data_type as type, 
             cols.is_nullable as nullable, 
@@ -340,7 +350,8 @@ export class ClustersService {
               JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name
               WHERE tc.constraint_type = 'FOREIGN KEY'
           ) kcu ON cols.table_name = kcu.table_name AND cols.column_name = kcu.column_name
-          WHERE cols.table_schema = 'public' AND cols.table_name = $1`,
+          WHERE cols.table_schema = 'public' AND cols.table_name = $1
+          ORDER BY cols.ordinal_position`,
           [tableName],
         );
         return res.rows;
