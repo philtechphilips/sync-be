@@ -208,6 +208,11 @@ export class ClustersController {
     @Param('id') id: string,
     @Body() body: { format: 'sql' | 'csv' | 'json'; data: any },
   ) {
-    return this.clustersService.restore(id, req.user.id, body.format, body.data);
+    return this.clustersService.restore(
+      id,
+      req.user.id,
+      body.format,
+      body.data,
+    );
   }
 }

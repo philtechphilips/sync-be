@@ -960,7 +960,9 @@ export class ClustersService {
           for (const row of data.data) {
             const keys = Object.keys(row);
             const cols = keys
-              .map((k) => (cluster.type === ClusterType.MYSQL ? `\`${k}\`` : `"${k}"`))
+              .map((k) =>
+                cluster.type === ClusterType.MYSQL ? `\`${k}\`` : `"${k}"`,
+              )
               .join(', ');
             const values = Object.values(row)
               .map((v) => {
@@ -1014,37 +1016,37 @@ export class ClustersService {
         .map((q: string) => q.trim())
         .filter((q: string) => q.length > 0);
       for (const query of queries) {
-          try {
-            await this.executeQuery(id, userId, query);
-          } catch (e) {
-              console.error(`Failed to execute restore query: ${query}`, e);
-          }
+        try {
+          await this.executeQuery(id, userId, query);
+        } catch (e) {
+          console.error(`Failed to execute restore query: ${query}`, e);
+        }
       }
       return { success: true };
     } else if (format === 'json') {
       for (const tableName of Object.keys(data)) {
-        for (const row of (data[tableName] as any[])) {
+        for (const row of data[tableName] as any[]) {
           await this.insertTableData(id, userId, tableName, row);
         }
       }
       return { success: true };
     } else if (format === 'csv') {
-       // Simple CSV restore (assuming headers match)
-       for (const tableName of Object.keys(data)) {
-           const lines = (data[tableName] as string).split('\n');
-           if (lines.length < 2) continue;
-           const headers = lines[0].split(',');
-           for (let i = 1; i < lines.length; i++) {
-               if (!lines[i]) continue;
-               const values = lines[i].split(',');
-               const row: Record<string, any> = {};
-               headers.forEach((h: string, idx: number) => {
-                   row[h] = values[idx];
-               });
-               await this.insertTableData(id, userId, tableName, row);
-           }
-       }
-       return { success: true };
+      // Simple CSV restore (assuming headers match)
+      for (const tableName of Object.keys(data)) {
+        const lines = (data[tableName] as string).split('\n');
+        if (lines.length < 2) continue;
+        const headers = lines[0].split(',');
+        for (let i = 1; i < lines.length; i++) {
+          if (!lines[i]) continue;
+          const values = lines[i].split(',');
+          const row: Record<string, any> = {};
+          headers.forEach((h: string, idx: number) => {
+            row[h] = values[idx];
+          });
+          await this.insertTableData(id, userId, tableName, row);
+        }
+      }
+      return { success: true };
     }
   }
 }

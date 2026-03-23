@@ -9,7 +9,7 @@ async function bootstrap() {
   const logger = new Logger('Server');
 
   const app = await NestFactory.create(AppModule);
-  
+
   const express = require('express');
   app.use(express.json({ limit: '100mb' }));
   app.use(express.urlencoded({ limit: '100mb', extended: true }));
