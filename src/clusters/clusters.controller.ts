@@ -11,6 +11,7 @@ import {
   ValidationPipe,
   Query,
   Patch,
+  Header,
 } from '@nestjs/common';
 import { ClustersService } from './clusters.service';
 import { CreateClusterDto } from './dto/create-cluster.dto';
@@ -190,5 +191,23 @@ export class ClustersController {
       body.tableNames,
       body.withData || false,
     );
+  }
+
+  @Get(':id/backup')
+  async backup(
+    @Request() req: any,
+    @Param('id') id: string,
+    @Query('format') format: 'sql' | 'csv' | 'json',
+  ) {
+    return this.clustersService.backup(id, req.user.id, format);
+  }
+
+  @Post(':id/restore')
+  async restore(
+    @Request() req: any,
+    @Param('id') id: string,
+    @Body() body: { format: 'sql' | 'csv' | 'json'; data: any },
+  ) {
+    return this.clustersService.restore(id, req.user.id, body.format, body.data);
   }
 }

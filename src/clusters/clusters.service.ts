@@ -838,9 +838,15 @@ export class ClustersService {
         try {
           if (dropDdl) await this.executeQuery(targetId, userId, dropDdl);
           await this.executeQuery(targetId, userId, ddl);
-          
+
           if (withData) {
-            const sourceData = await this.findTableData(sourceId, userId, tableName, 1, 1000);
+            const sourceData = await this.findTableData(
+              sourceId,
+              userId,
+              tableName,
+              1,
+              1000,
+            );
             if (sourceData && sourceData.data) {
               for (const row of sourceData.data) {
                 await this.insertTableData(targetId, userId, tableName, row);
@@ -925,5 +931,120 @@ export class ClustersService {
     });
 
     return `CREATE TABLE "${tableName}" (\n  ${colStrings.join(',\n  ')}\n);`;
+  }
+
+  async backup(id: string, userId: string, format: 'sql' | 'csv' | 'json') {
+    const cluster = await this.findOne(id, userId);
+    const tables = await this.findTables(id, userId);
+    const schema = await this.getSchema(id, userId);
+    const tableSchemas = this.groupByTable(schema);
+
+    const backupData: any = {};
+    let sqlOutput = `-- SynqDB Backup\n-- Cluster: ${cluster.name}\n-- Date: ${new Date().toISOString()}\n\n`;
+
+    for (const table of tables) {
+      const tableName = table.name;
+      const columns = tableSchemas[tableName];
+      const data = await this.findTableData(id, userId, tableName, 1, 5000);
+
+      if (format === 'sql') {
+        let ddl = '';
+        if (cluster.type === ClusterType.MYSQL) {
+          ddl = this.generateMySQLCreateTable(tableName, columns);
+        } else {
+          ddl = this.generatePostgresCreateTable(tableName, columns);
+        }
+        sqlOutput += `${ddl}\n\n`;
+
+        if (data && data.data.length > 0) {
+          for (const row of data.data) {
+            const keys = Object.keys(row);
+            const cols = keys
+              .map((k) => (cluster.type === ClusterType.MYSQL ? `\`${k}\`` : `"${k}"`))
+              .join(', ');
+            const values = Object.values(row)
+              .map((v) => {
+                if (v === null) return 'NULL';
+                if (typeof v === 'string') return `'${v.replace(/'/g, "''")}'`;
+                if (v instanceof Date) return `'${v.toISOString()}'`;
+                return v;
+              })
+              .join(', ');
+            sqlOutput += `INSERT INTO ${cluster.type === ClusterType.MYSQL ? `\`${tableName}\`` : `"${tableName}"`} (${cols}) VALUES (${values});\n`;
+          }
+          sqlOutput += '\n';
+        }
+      } else if (format === 'json') {
+        backupData[tableName] = data?.data || [];
+      } else if (format === 'csv') {
+        if (data && data.data && data.data.length > 0) {
+          const headers = Object.keys(data.data[0]);
+          const rows = data.data.map((row: any) =>
+            headers
+              .map((h) => {
+                const val = row[h];
+                if (val === null) return '';
+                const str = String(val);
+                return str.includes(',') || str.includes('"')
+                  ? `"${str.replace(/"/g, '""')}"`
+                  : str;
+              })
+              .join(','),
+          );
+          backupData[tableName] = [headers.join(','), ...rows].join('\n');
+        } else {
+          backupData[tableName] = '';
+        }
+      }
+    }
+
+    if (format === 'sql') return { content: sqlOutput };
+    return backupData;
+  }
+
+  async restore(
+    id: string,
+    userId: string,
+    format: 'sql' | 'csv' | 'json',
+    data: any,
+  ) {
+    if (format === 'sql') {
+      const queries = (data.content as string)
+        .split(';')
+        .map((q: string) => q.trim())
+        .filter((q: string) => q.length > 0);
+      for (const query of queries) {
+          try {
+            await this.executeQuery(id, userId, query);
+          } catch (e) {
+              console.error(`Failed to execute restore query: ${query}`, e);
+          }
+      }
+      return { success: true };
+    } else if (format === 'json') {
+      for (const tableName of Object.keys(data)) {
+        for (const row of (data[tableName] as any[])) {
+          await this.insertTableData(id, userId, tableName, row);
+        }
+      }
+      return { success: true };
+    } else if (format === 'csv') {
+       // Simple CSV restore (assuming headers match)
+       for (const tableName of Object.keys(data)) {
+           const lines = (data[tableName] as string).split('\n');
+           if (lines.length < 2) continue;
+           const headers = lines[0].split(',');
+           for (let i = 1; i < lines.length; i++) {
+               if (!lines[i]) continue;
+               const values = lines[i].split(',');
+               const row: Record<string, any> = {};
+               headers.forEach((h: string, idx: number) => {
+                   row[h] = values[idx];
+               });
+               await this.insertTableData(id, userId, tableName, row);
+           }
+       }
+       return { success: true };
+    }
   }
 }
