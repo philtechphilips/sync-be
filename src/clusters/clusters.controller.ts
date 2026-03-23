@@ -157,4 +157,38 @@ export class ClustersController {
   async getQueryLogs(@Request() req: any, @Param('id') id: string) {
     return this.clustersService.getQueryLogs(id, req.user.id);
   }
+
+  @Delete(':id/tables/:tableName')
+  async dropTable(
+    @Request() req: any,
+    @Param('id') id: string,
+    @Param('tableName') tableName: string,
+  ) {
+    return this.clustersService.dropTable(id, req.user.id, tableName);
+  }
+
+  @Get(':id/compare/:targetId')
+  async compareSchemas(
+    @Request() req: any,
+    @Param('id') sourceId: string,
+    @Param('targetId') targetId: string,
+  ) {
+    return this.clustersService.compareSchemas(sourceId, targetId, req.user.id);
+  }
+
+  @Post(':id/sync/:targetId')
+  async syncSchema(
+    @Request() req: any,
+    @Param('id') sourceId: string,
+    @Param('targetId') targetId: string,
+    @Body() body: { tableNames: string[]; withData?: boolean },
+  ) {
+    return this.clustersService.syncSchema(
+      sourceId,
+      targetId,
+      req.user.id,
+      body.tableNames,
+      body.withData || false,
+    );
+  }
 }

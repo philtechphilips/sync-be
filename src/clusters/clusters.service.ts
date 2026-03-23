@@ -676,4 +676,254 @@ export class ClustersService {
     const cluster = await this.findOne(id, userId);
     return this.clusterRepo.remove(cluster);
   }
+
+  async dropTable(clusterId: string, userId: string, tableName: string) {
+    const cluster = await this.clusterRepo.findOne({
+      where: { id: clusterId, user: { id: userId } },
+    });
+    if (!cluster) throw new Error('Cluster not found');
+
+    let sql = '';
+    if (cluster.type === ClusterType.MYSQL) {
+      sql = `DROP TABLE IF EXISTS \`${tableName}\`;`;
+    } else if (cluster.type === ClusterType.POSTGRES) {
+      sql = `DROP TABLE IF EXISTS "${tableName}" CASCADE;`;
+    }
+
+    try {
+      await this.executeQuery(clusterId, userId, sql);
+      return { success: true };
+    } catch (error) {
+      throw new Error(`Failed to drop table: ${error.message}`);
+    }
+  }
+
+  async compareSchemas(sourceId: string, targetId: string, userId: string) {
+    const sourceSchema = await this.getSchema(sourceId, userId);
+    const targetSchema = await this.getSchema(targetId, userId);
+
+    const sourceTables = this.groupByTable(sourceSchema);
+    const targetTables = this.groupByTable(targetSchema);
+
+    const diffs: {
+      missingInTarget: any[];
+      missingInSource: any[];
+      tableMismatches: any[];
+      matchingTables: any[];
+    } = {
+      missingInTarget: [],
+      missingInSource: [],
+      tableMismatches: [],
+      matchingTables: [],
+    };
+
+    for (const tableName of Object.keys(sourceTables)) {
+      if (!targetTables[tableName]) {
+        diffs.missingInTarget.push({
+          tableName,
+          columns: sourceTables[tableName],
+        });
+      } else {
+        const tableDiff = this.compareTableColumns(
+          tableName,
+          sourceTables[tableName],
+          targetTables[tableName],
+        );
+        if (tableDiff.hasDiff) {
+          diffs.tableMismatches.push(tableDiff);
+        } else {
+          diffs.matchingTables.push({
+            tableName,
+            columns: sourceTables[tableName],
+          });
+        }
+      }
+    }
+
+    for (const tableName of Object.keys(targetTables)) {
+      if (!sourceTables[tableName]) {
+        diffs.missingInSource.push({
+          tableName,
+          columns: targetTables[tableName],
+        });
+      }
+    }
+
+    return diffs;
+  }
+
+  private groupByTable(schema: any[]) {
+    const tables: Record<string, any[]> = {};
+    schema.forEach((col) => {
+      const t = col.tableName || col.table_name;
+      if (!tables[t]) tables[t] = [];
+      tables[t].push(col);
+    });
+    return tables;
+  }
+
+  private compareTableColumns(
+    tableName: string,
+    sourceCols: any[],
+    targetCols: any[],
+  ) {
+    const diff: any = {
+      tableName,
+      hasDiff: false,
+      missingColumns: [],
+      typeMismatches: [],
+    };
+
+    const sourceColMap = new Map(sourceCols.map((c) => [c.name, c]));
+    const targetColMap = new Map(targetCols.map((c) => [c.name, c]));
+
+    sourceColMap.forEach((sCol, name) => {
+      const tCol = targetColMap.get(name);
+      if (!tCol) {
+        diff.missingColumns.push({ ...sCol, status: 'missing_in_target' });
+        diff.hasDiff = true;
+      } else if (
+        sCol.type.toLowerCase().trim() !== tCol.type.toLowerCase().trim()
+      ) {
+        diff.typeMismatches.push({
+          name,
+          sourceType: sCol.type,
+          targetType: tCol.type,
+        });
+        diff.hasDiff = true;
+      }
+    });
+
+    targetColMap.forEach((tCol, name) => {
+      if (!sourceColMap.has(name)) {
+        diff.missingColumns.push({ ...tCol, status: 'missing_in_source' });
+        diff.hasDiff = true;
+      }
+    });
+
+    return diff;
+  }
+
+  async syncSchema(
+    sourceId: string,
+    targetId: string,
+    userId: string,
+    tableNames: string[],
+    withData: boolean = false,
+  ) {
+    const sourceSchema = await this.getSchema(sourceId, userId);
+    const targetCluster = await this.findOne(targetId, userId);
+    const sourceTables = this.groupByTable(sourceSchema);
+
+    const syncResults = [];
+
+    for (const tableName of tableNames) {
+      const columns = sourceTables[tableName];
+      if (!columns) continue;
+
+      let ddl = '';
+      let dropDdl = '';
+      if (targetCluster.type === ClusterType.MYSQL) {
+        dropDdl = `DROP TABLE IF EXISTS \`${tableName}\`;`;
+        ddl = this.generateMySQLCreateTable(tableName, columns);
+      } else if (targetCluster.type === ClusterType.POSTGRES) {
+        dropDdl = `DROP TABLE IF EXISTS "${tableName}" CASCADE;`;
+        ddl = this.generatePostgresCreateTable(tableName, columns);
+      }
+
+      let success = true;
+      let error = null;
+
+      if (ddl) {
+        try {
+          if (dropDdl) await this.executeQuery(targetId, userId, dropDdl);
+          await this.executeQuery(targetId, userId, ddl);
+          
+          if (withData) {
+            const sourceData = await this.findTableData(sourceId, userId, tableName, 1, 1000);
+            if (sourceData && sourceData.data) {
+              for (const row of sourceData.data) {
+                await this.insertTableData(targetId, userId, tableName, row);
+              }
+            }
+          }
+        } catch (e) {
+          success = false;
+          error = e.message;
+        }
+      }
+
+      syncResults.push({ tableName, success, error });
+    }
+
+    return syncResults;
+  }
+
+  private generateMySQLCreateTable(tableName: string, columns: any[]) {
+    const colStrings = columns.map((c) => {
+      let s = `\`${c.name}\` ${c.fullType || c.type}`;
+      if (c.nullable === 'NO') s += ' NOT NULL';
+
+      if (c.defaultValue !== null && c.defaultValue !== undefined) {
+        const def = String(c.defaultValue).trim();
+        const upperDef = def.toUpperCase();
+
+        if (upperDef === 'NULL') {
+          s += ' DEFAULT NULL';
+        } else if (
+          upperDef === 'CURRENT_TIMESTAMP' ||
+          upperDef.includes('(') ||
+          upperDef.includes(')')
+        ) {
+          s += ` DEFAULT ${def}`;
+        } else if (
+          (def.startsWith("'") && def.endsWith("'")) ||
+          !isNaN(Number(def))
+        ) {
+          s += ` DEFAULT ${def}`;
+        } else {
+          s += ` DEFAULT '${def.replace(/'/g, "''")}'`;
+        }
+      }
+
+      if (c.columnKey === 'PRI' || c.isPrimary) s += ' PRIMARY KEY';
+      return s;
+    });
+
+    return `CREATE TABLE \`${tableName}\` (\n  ${colStrings.join(',\n  ')}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`;
+  }
+
+  private generatePostgresCreateTable(tableName: string, columns: any[]) {
+    const colStrings = columns.map((c) => {
+      let type = c.udtName || c.type;
+      if (type === 'varchar') type = 'text';
+
+      let s = `"${c.name}" ${type}`;
+      if (c.nullable === 'NO') s += ' NOT NULL';
+
+      if (c.defaultValue !== null && c.defaultValue !== undefined) {
+        const def = String(c.defaultValue).trim();
+        const upperDef = def.toUpperCase();
+
+        if (upperDef === 'NULL') {
+          s += ' DEFAULT NULL';
+        } else if (
+          !upperDef.includes('NEXTVAL') &&
+          !upperDef.includes('(') &&
+          !upperDef.includes(')')
+        ) {
+          if (!def.startsWith("'") && isNaN(Number(def))) {
+            s += ` DEFAULT '${def.replace(/'/g, "''")}'`;
+          } else {
+            s += ` DEFAULT ${def}`;
+          }
+        } else if (!upperDef.includes('NEXTVAL')) {
+          s += ` DEFAULT ${def}`;
+        }
+      }
+      return s;
+    });
+
+    return `CREATE TABLE "${tableName}" (\n  ${colStrings.join(',\n  ')}\n);`;
+  }
 }
