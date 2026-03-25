@@ -6,6 +6,7 @@ import { datasourceOptions } from './config/typeorm.config';
 import { AuthModule } from './auth/auth.module';
 import { ClustersModule } from './clusters/clusters.module';
 import { AIModule } from './ai/ai.module';
+import { QueryManagementModule } from './query-management/query-management.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { AIModule } from './ai/ai.module';
     AuthModule,
     ClustersModule,
     AIModule,
+    QueryManagementModule,
   ],
   controllers: [AppController],
   providers: [AppService],
