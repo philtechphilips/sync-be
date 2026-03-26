@@ -17,10 +17,7 @@ import {
   CreateSavedQueryDto,
   UpdateSavedQueryDto,
 } from './dto/saved-query.dto';
-import {
-  CreateCollectionDto,
-  UpdateCollectionDto,
-} from './dto/collection.dto';
+import { CreateCollectionDto, UpdateCollectionDto } from './dto/collection.dto';
 
 @Controller('/v1/query-management')
 @UseGuards(JwtAuthGuard)
@@ -64,7 +61,10 @@ export class QueryManagementController {
 
   @Post('/collections')
   @UsePipes(ValidationPipe)
-  async createCollection(@Request() req: any, @Body() dto: CreateCollectionDto) {
+  async createCollection(
+    @Request() req: any,
+    @Body() dto: CreateCollectionDto,
+  ) {
     return this.queryService.createCollection(req.user.id, dto);
   }
 

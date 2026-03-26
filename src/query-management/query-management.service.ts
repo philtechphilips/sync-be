@@ -7,10 +7,7 @@ import {
   CreateSavedQueryDto,
   UpdateSavedQueryDto,
 } from './dto/saved-query.dto';
-import {
-  CreateCollectionDto,
-  UpdateCollectionDto,
-} from './dto/collection.dto';
+import { CreateCollectionDto, UpdateCollectionDto } from './dto/collection.dto';
 
 @Injectable()
 export class QueryManagementService {
@@ -105,9 +102,11 @@ export class QueryManagementService {
     });
 
     const rootCollections = allCollections.filter((c) => !c.parentId);
-    
+
     const buildTree = (collection: Collection): any => {
-      const children = allCollections.filter((c) => c.parentId === collection.id);
+      const children = allCollections.filter(
+        (c) => c.parentId === collection.id,
+      );
       return {
         ...collection,
         children: children.map(buildTree),

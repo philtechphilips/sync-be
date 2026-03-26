@@ -7,10 +7,7 @@ import { QueryManagementController } from './query-management.controller';
 import { ClustersModule } from '../clusters/clusters.module';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([SavedQuery, Collection]),
-    ClustersModule,
-  ],
+  imports: [TypeOrmModule.forFeature([SavedQuery, Collection]), ClustersModule],
   controllers: [QueryManagementController],
   providers: [QueryManagementService],
   exports: [QueryManagementService],
