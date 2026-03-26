@@ -1,5 +1,5 @@
-import { NestFactory } from '@nestjs/core';
-import { Logger } from '@nestjs/common';
+import { NestFactory, Reflector } from '@nestjs/core';
+import { Logger, ClassSerializerInterceptor } from '@nestjs/common';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { AppModule } from './app.module';
@@ -41,7 +41,8 @@ async function bootstrap() {
       max: 30,
       standardHeaders: true,
       legacyHeaders: false,
-      message: 'AI query limit reached. Please wait before sending more requests.',
+      message:
+        'AI query limit reached. Please wait before sending more requests.',
     }),
   );
 
@@ -56,6 +57,8 @@ async function bootstrap() {
       message: 'Too many authentication attempts. Please try again later.',
     }),
   );
+
+  app.useGlobalInterceptors(new ClassSerializerInterceptor(app.get(Reflector)));
 
   await app.listen(config.PORT.APP_PORT, () => {
     logger.log(`Server started on ${config.PORT.APP_PORT}`);

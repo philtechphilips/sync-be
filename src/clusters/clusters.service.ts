@@ -2,7 +2,7 @@ import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as mysql from 'mysql2/promise';
-import { Client, PoolClient } from 'pg';
+import { Client } from 'pg';
 import * as mssql from 'mssql';
 import { Cluster, ClusterType } from './entities/cluster.entity';
 import { QueryLog } from './entities/query-log.entity';
@@ -125,7 +125,7 @@ export class ClustersService {
     }
   }
 
-  async findAll(userId: string) {
+  async findAll(userId: string): Promise<Cluster[]> {
     const clusters = await this.clusterRepo.find({
       where: { userId },
       order: { createdAt: 'DESC' },
@@ -133,7 +133,14 @@ export class ClustersService {
     return clusters.map((c) => this.decryptCluster(c));
   }
 
-  async findOne(id: string, userId: string) {
+  async findOne(id: string, userId: string): Promise<Cluster> {
+    const cluster = await this.clusterRepo.findOne({ where: { id, userId } });
+    if (!cluster) throw new BadRequestException('Cluster not found!');
+    return this.decryptCluster(cluster);
+  }
+
+  // Internal use only — returns full decrypted credentials for DB connections
+  private async findClusterForConnection(id: string, userId: string): Promise<Cluster> {
     const cluster = await this.clusterRepo.findOne({ where: { id, userId } });
     if (!cluster) throw new BadRequestException('Cluster not found!');
     return this.decryptCluster(cluster);
@@ -221,7 +228,7 @@ export class ClustersService {
   }
 
   async findTables(id: string, userId: string) {
-    const cluster = await this.findOne(id, userId);
+    const cluster = await this.findClusterForConnection(id, userId);
     const { type, database } = cluster;
 
     if (type === ClusterType.MYSQL) {
@@ -283,7 +290,7 @@ export class ClustersService {
   }
 
   async findTableColumns(id: string, userId: string, tableName: string) {
-    const cluster = await this.findOne(id, userId);
+    const cluster = await this.findClusterForConnection(id, userId);
     const { type, database } = cluster;
     await this.validateTableExists(cluster, tableName);
 
@@ -323,7 +330,7 @@ export class ClustersService {
   }
 
   async getSchema(id: string, userId: string) {
-    const cluster = await this.findOne(id, userId);
+    const cluster = await this.findClusterForConnection(id, userId);
     const { type, database } = cluster;
 
     if (type === ClusterType.MYSQL) {
@@ -367,7 +374,7 @@ export class ClustersService {
     limit: number = 100,
     filters: any[] = [],
   ) {
-    const cluster = await this.findOne(id, userId);
+    const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
     const offset = (page - 1) * limit;
 
@@ -486,7 +493,7 @@ export class ClustersService {
     data: any,
     where: any,
   ) {
-    const cluster = await this.findOne(id, userId);
+    const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
     const { type } = cluster;
 
@@ -542,7 +549,7 @@ export class ClustersService {
     tableName: string,
     data: any,
   ) {
-    const cluster = await this.findOne(id, userId);
+    const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
     const { type } = cluster;
 
@@ -589,7 +596,7 @@ export class ClustersService {
     tableName: string,
     where: any,
   ) {
-    const cluster = await this.findOne(id, userId);
+    const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
     const { type } = cluster;
 
@@ -628,7 +635,7 @@ export class ClustersService {
   }
 
   async executeQuery(id: string, userId: string, query: string) {
-    const cluster = await this.findOne(id, userId);
+    const cluster = await this.findClusterForConnection(id, userId);
     const startTime = Date.now();
     let success = true,
       errorMessage = null,
@@ -673,8 +680,8 @@ export class ClustersService {
   }
 
   async remove(id: string, userId: string) {
-    const cluster = await this.findOne(id, userId);
-    return this.clusterRepo.remove(cluster);
+    const cluster = await this.findClusterForConnection(id, userId);
+    await this.clusterRepo.remove(cluster);
   }
 
   async dropTable(clusterId: string, userId: string, tableName: string) {
@@ -812,7 +819,7 @@ export class ClustersService {
     withData: boolean = false,
   ) {
     const sourceSchema = await this.getSchema(sourceId, userId);
-    const targetCluster = await this.findOne(targetId, userId);
+    const targetCluster = await this.findClusterForConnection(targetId, userId);
     const sourceTables = this.groupByTable(sourceSchema);
 
     const syncResults = [];
@@ -934,7 +941,7 @@ export class ClustersService {
   }
 
   async backup(id: string, userId: string, format: 'sql' | 'csv' | 'json') {
-    const cluster = await this.findOne(id, userId);
+    const cluster = await this.findClusterForConnection(id, userId);
     const tables = await this.findTables(id, userId);
     const schema = await this.getSchema(id, userId);
     const tableSchemas = this.groupByTable(schema);

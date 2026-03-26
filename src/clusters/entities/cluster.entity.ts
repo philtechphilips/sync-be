@@ -7,6 +7,7 @@ import {
   ManyToOne,
   JoinColumn,
 } from 'typeorm';
+import { Exclude, Expose } from 'class-transformer';
 import { User } from '../../auth/entities/user.entity';
 
 export enum ClusterType {
@@ -15,14 +16,18 @@ export enum ClusterType {
   MSSQL = 'mssql',
 }
 
+@Exclude()
 @Entity('clusters')
 export class Cluster {
+  @Expose()
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  @Expose()
   @Column({ type: 'text' })
   name: string;
 
+  @Expose()
   @Column({
     type: 'enum',
     enum: ClusterType,
@@ -30,6 +35,7 @@ export class Cluster {
   })
   type: ClusterType;
 
+  // Sensitive — never exposed to the client
   @Column({ type: 'text' })
   host: string;
 
@@ -52,9 +58,11 @@ export class Cluster {
   @JoinColumn({ name: 'userId' })
   user: User;
 
+  @Expose()
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
+  @Expose()
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }
