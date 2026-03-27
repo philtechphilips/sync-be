@@ -16,6 +16,8 @@ import {
 import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { UpdateAuthDto } from './dto/update.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { LocalGuard } from './guards/local.guard';
 import { JwtAuthGuard } from './guards/jwt.guard';
 import { RegisterAuthDto } from './dto/register.dto';
@@ -164,6 +166,20 @@ export class AuthController {
   @UsePipes(ValidationPipe)
   update(@Request() req: any, @Body() updateAuthDto: UpdateAuthDto) {
     return this.authService.update(req.user.id, updateAuthDto);
+  }
+
+  @Patch('profile')
+  @UseGuards(JwtAuthGuard)
+  @UsePipes(ValidationPipe)
+  updateProfile(@Request() req: any, @Body() dto: UpdateProfileDto) {
+    return this.authService.updateProfile(req.user.id, dto);
+  }
+
+  @Patch('password')
+  @UseGuards(JwtAuthGuard)
+  @UsePipes(ValidationPipe)
+  changePassword(@Request() req: any, @Body() dto: ChangePasswordDto) {
+    return this.authService.changePassword(req.user.id, dto);
   }
 
   @Post('forgot-password')

@@ -8,6 +8,8 @@ import {
 } from '@nestjs/common';
 import { LoginAuthDto } from './dto/login.dto';
 import { UpdateAuthDto } from './dto/update.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { JwtService } from '@nestjs/jwt';
 import { RegisterAuthDto } from './dto/register.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -205,6 +207,32 @@ export class AuthService {
     } catch (error) {
       throw error;
     }
+  }
+
+  async updateProfile(id: string, dto: UpdateProfileDto) {
+    const user = await this.authRepo.findOne({ id });
+    if (!user) throw new BadRequestException('User not found!');
+
+    if (dto.full_name !== undefined) user.full_name = dto.full_name;
+    if (dto.profile_picture !== undefined) user.profile_picture = dto.profile_picture;
+
+    await this.authRepo.save(user);
+
+    const { password, access_token, refresh_token, refresh_token_expiry, ...safe } = user;
+    return safe;
+  }
+
+  async changePassword(id: string, dto: ChangePasswordDto) {
+    const user = await this.authRepo.findOne({ id });
+    if (!user) throw new BadRequestException('User not found!');
+
+    const valid = await validatePassword(dto.current_password, user.password);
+    if (!valid) throw new BadRequestException('Current password is incorrect.');
+
+    user.password = await hashPassword(dto.new_password);
+    await this.authRepo.save(user);
+
+    return { success: true, message: 'Password updated successfully.' };
   }
 
   getGoogleAuthUrl(): string {

@@ -140,7 +140,10 @@ export class ClustersService {
   }
 
   // Internal use only — returns full decrypted credentials for DB connections
-  private async findClusterForConnection(id: string, userId: string): Promise<Cluster> {
+  private async findClusterForConnection(
+    id: string,
+    userId: string,
+  ): Promise<Cluster> {
     const cluster = await this.clusterRepo.findOne({ where: { id, userId } });
     if (!cluster) throw new BadRequestException('Cluster not found!');
     return this.decryptCluster(cluster);
