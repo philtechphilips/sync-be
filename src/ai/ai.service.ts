@@ -37,6 +37,34 @@ export class AIService {
       .replace(/```sql|```/g, '');
   }
 
+  async *generateSQLStream(clusterId: string, userId: string, prompt: string) {
+    const cluster = await this.clustersService.findOne(clusterId, userId);
+    const rawSchema = await this.clustersService.getSchema(clusterId, userId);
+    const compactSchema = this.getCompressedSchema(rawSchema);
+
+    const stream = await this.openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a professional SQL expert. Generate valid SQL code for ${cluster.type} database based on the provided schema. Only return raw SQL. No explanations, no markdown blocks. Just the SQL. Use ${cluster.type === ClusterType.MSSQL ? 'T-SQL' : cluster.type} syntax.`,
+        },
+        {
+          role: 'user',
+          content: `Schema: ${compactSchema}\n\nObjective: "${prompt}"`,
+        },
+      ],
+      stream: true,
+    });
+
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || '';
+      if (content) {
+        yield content.replace(/```sql|```/g, '');
+      }
+    }
+  }
+
   async explainSQL(sql: string, mode: 'simple' | 'advanced') {
     const response = await this.openai.chat.completions.create({
       model: 'gpt-4o',

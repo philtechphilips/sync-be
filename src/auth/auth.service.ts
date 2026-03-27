@@ -214,11 +214,18 @@ export class AuthService {
     if (!user) throw new BadRequestException('User not found!');
 
     if (dto.full_name !== undefined) user.full_name = dto.full_name;
-    if (dto.profile_picture !== undefined) user.profile_picture = dto.profile_picture;
+    if (dto.profile_picture !== undefined)
+      user.profile_picture = dto.profile_picture;
 
     await this.authRepo.save(user);
 
-    const { password, access_token, refresh_token, refresh_token_expiry, ...safe } = user;
+    const {
+      password,
+      access_token,
+      refresh_token,
+      refresh_token_expiry,
+      ...safe
+    } = user;
     return safe;
   }
 

@@ -1,5 +1,5 @@
-import { IsString, IsEnum, IsNumber, IsOptional } from 'class-validator';
-import { ClusterType } from '../entities/cluster.entity';
+import { IsString, IsEnum, IsNumber, IsOptional, IsHexColor } from 'class-validator';
+import { ClusterType, ClusterEnvironment } from '../entities/cluster.entity';
 
 export class CreateClusterDto {
   @IsString()
@@ -7,6 +7,14 @@ export class CreateClusterDto {
 
   @IsEnum(ClusterType)
   type: ClusterType;
+
+  @IsEnum(ClusterEnvironment)
+  @IsOptional()
+  environment?: ClusterEnvironment;
+
+  @IsString()
+  @IsOptional()
+  color?: string;
 
   @IsString()
   host: string;

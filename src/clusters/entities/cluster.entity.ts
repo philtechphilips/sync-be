@@ -16,6 +16,12 @@ export enum ClusterType {
   MSSQL = 'mssql',
 }
 
+export enum ClusterEnvironment {
+  DEVELOPMENT = 'development',
+  STAGING = 'staging',
+  PRODUCTION = 'production',
+}
+
 @Exclude()
 @Entity('clusters')
 export class Cluster {
@@ -57,6 +63,18 @@ export class Cluster {
   @ManyToOne(() => User)
   @JoinColumn({ name: 'userId' })
   user: User;
+
+  @Expose()
+  @Column({
+    type: 'enum',
+    enum: ClusterEnvironment,
+    default: ClusterEnvironment.DEVELOPMENT,
+  })
+  environment: ClusterEnvironment;
+
+  @Expose()
+  @Column({ type: 'text', nullable: true })
+  color: string;
 
   @Expose()
   @CreateDateColumn({ name: 'created_at' })

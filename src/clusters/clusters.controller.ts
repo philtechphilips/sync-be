@@ -149,9 +149,15 @@ export class ClustersController {
   async executeQuery(
     @Request() req: any,
     @Param('id') id: string,
-    @Body() body: { query: string },
+    @Body() body: { query: string; page?: number; limit?: number },
   ) {
-    return this.clustersService.executeQuery(id, req.user.id, body.query);
+    return this.clustersService.executeQuery(
+      id,
+      req.user.id,
+      body.query,
+      body.page,
+      body.limit,
+    );
   }
 
   @Get(':id/query/logs')

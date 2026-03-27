@@ -43,6 +43,7 @@ export class ClustersService {
         waitForConnections: true,
         connectionLimit: 10,
         queueLimit: 0,
+        multipleStatements: true,
       });
       this.mysqlPools.set(id, pool);
     }
@@ -161,6 +162,7 @@ export class ClustersService {
           password,
           database,
           connectTimeout: 5000,
+          multipleStatements: true,
         });
         await connection.end();
         return { success: true, message: 'MySQL connection successful!' };
@@ -637,27 +639,96 @@ export class ClustersService {
     }
   }
 
-  async executeQuery(id: string, userId: string, query: string) {
+  async executeQuery(
+    id: string,
+    userId: string,
+    query: string,
+    page?: number,
+    limit?: number,
+  ) {
     const cluster = await this.findClusterForConnection(id, userId);
     const startTime = Date.now();
     let success = true,
       errorMessage = null,
-      results = null;
+      results = null,
+      totals: number[] = [];
+
+    const isSelect = query.trim().toUpperCase().startsWith('SELECT');
+    const isSingleQuery = !query.includes(';') || query.trim().endsWith(';');
+    const usePagination = page && limit && isSelect && isSingleQuery;
+
+    let execQuery = query;
+    if (usePagination) {
+      const offset = (page - 1) * limit;
+      if (cluster.type === ClusterType.MSSQL) {
+        execQuery = `SELECT * FROM (${query.replace(/;$/, '')}) AS __synq_sub ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
+      } else {
+        execQuery = `SELECT * FROM (${query.replace(/;$/, '')}) AS __synq_sub LIMIT ${limit} OFFSET ${offset}`;
+      }
+    }
 
     try {
       if (cluster.type === ClusterType.MYSQL) {
-        const [rows] = await this.getMySQLPool(cluster).query(query);
-        results = rows;
+        const pool = this.getMySQLPool(cluster);
+        const [rows] = await pool.query(execQuery);
+        if (Array.isArray(rows) && rows.length > 0 && Array.isArray(rows[0])) {
+          results = rows;
+        } else {
+          results = [rows];
+        }
+
+        if (usePagination) {
+          const [countRes]: any = await pool.query(
+            `SELECT COUNT(*) as total FROM (${query.replace(/;$/, '')}) AS __synq_count`,
+          );
+          totals = [countRes[0].total];
+        } else {
+          totals = (results || []).map((r: any) =>
+            Array.isArray(r) ? r.length : 0,
+          );
+        }
       } else if (cluster.type === ClusterType.POSTGRES) {
-        const res = await this.getPGPool(cluster).query(query);
-        results = res.rows || res;
+        const pool = this.getPGPool(cluster);
+        const res = await pool.query(execQuery);
+        if (Array.isArray(res)) {
+          results = res.map((r) => r.rows || []);
+        } else {
+          results = [res.rows || []];
+        }
+
+        if (usePagination) {
+          const countRes = await pool.query(
+            `SELECT COUNT(*) as total FROM (${query.replace(/;$/, '')}) AS __synq_count`,
+          );
+          totals = [parseInt(countRes.rows[0].total)];
+        } else {
+          totals = (results || []).map((r: any) =>
+            Array.isArray(r) ? r.length : 0,
+          );
+        }
       } else if (cluster.type === ClusterType.MSSQL) {
-        const result = await (await this.getMSSQLPool(cluster))
-          .request()
-          .query(query);
-        results = result.recordset;
+        const pool = await this.getMSSQLPool(cluster);
+        const result = await pool.request().query(execQuery);
+        results =
+          Array.isArray(result.recordsets) && result.recordsets.length > 0
+            ? result.recordsets
+            : [result.recordset];
+
+        if (usePagination) {
+          const countRes = await pool
+            .request()
+            .query(
+              `SELECT COUNT(*) as total FROM (${query.replace(/;$/, '')}) AS __synq_count`,
+            );
+          totals = [countRes.recordset[0].total];
+        } else {
+          totals = (results || []).map((r: any) =>
+            Array.isArray(r) ? r.length : 0,
+          );
+        }
       }
-    } catch (error) {
+    }
+ catch (error) {
       success = false;
       errorMessage = error.message;
       throw new BadRequestException(error.message);
@@ -671,7 +742,7 @@ export class ClustersService {
         errorMessage,
       });
     }
-    return results;
+    return { results, totals, executionTimeMs: Date.now() - startTime };
   }
 
   async getQueryLogs(clusterId: string, userId: string) {
