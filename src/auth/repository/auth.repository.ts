@@ -17,8 +17,7 @@ export class AuthRepo extends BaseRepository<User> {
   }
 
   async save(data: User) {
-    const { password, ...userData } = data;
-    return await this.userRepo.save(userData as User);
+    return await this.userRepo.save(data);
   }
 
   async findAll(): Promise<User[]> {

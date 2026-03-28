@@ -49,6 +49,7 @@ export class AuthController {
           full_name: response.full_name,
           role: response.role,
           profile_picture: response.profile_picture,
+          settings: response.settings,
         },
         access_token: response.access_token,
         refresh_token: response.refresh_token,
@@ -158,7 +159,7 @@ export class AuthController {
   @Roles(Role.User)
   @UseGuards(JwtAuthGuard)
   status(@Request() req: any) {
-    return req.user;
+    return this.authService.update(req.user.id, {}); // re-fetch fresh user
   }
 
   @Patch('/')

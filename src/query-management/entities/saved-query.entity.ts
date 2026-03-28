@@ -1,21 +1,10 @@
-import {
-  Entity,
-  Column,
-  PrimaryGeneratedColumn,
-  CreateDateColumn,
-  UpdateDateColumn,
-  ManyToOne,
-  JoinColumn,
-} from 'typeorm';
-import { User } from '../../auth/entities/user.entity';
+import { Entity, Column, ManyToOne, JoinColumn } from 'typeorm';
+import { UserOwnedEntity } from '../../common/entities/user-owned.entity';
 import { Collection } from './collection.entity';
 import { Cluster } from '../../clusters/entities/cluster.entity';
 
 @Entity('saved_queries')
-export class SavedQuery {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
+export class SavedQuery extends UserOwnedEntity {
   @Column()
   name: string;
 
@@ -29,13 +18,6 @@ export class SavedQuery {
   @JoinColumn({ name: 'clusterId' })
   cluster: Cluster;
 
-  @Column({ name: 'userId' })
-  userId: string;
-
-  @ManyToOne(() => User)
-  @JoinColumn({ name: 'userId' })
-  user: User;
-
   @Column({ nullable: true, name: 'collectionId' })
   collectionId: string;
 
@@ -47,10 +29,4 @@ export class SavedQuery {
 
   @Column({ type: 'simple-array', nullable: true })
   tags: string[];
-
-  @CreateDateColumn({ name: 'created_at' })
-  createdAt: Date;
-
-  @UpdateDateColumn({ name: 'updated_at' })
-  updatedAt: Date;
 }

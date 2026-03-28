@@ -58,6 +58,10 @@ export class User {
   clusters: Cluster[];
 
   @Expose()
+  @Column({ type: 'simple-json', nullable: true })
+  settings: Record<string, any>;
+
+  @Expose()
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

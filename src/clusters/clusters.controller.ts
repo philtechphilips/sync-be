@@ -13,18 +13,15 @@ import {
   Patch,
   Header,
 } from '@nestjs/common';
+import { Cluster } from './entities/cluster.entity';
 import { ClustersService } from './clusters.service';
 import { CreateClusterDto } from './dto/create-cluster.dto';
-import { JwtAuthGuard } from '../auth/guards/jwt.guard';
+import { UserOwnedController } from '../common/controllers/user-owned.controller';
 
 @Controller('/v1/clusters')
-@UseGuards(JwtAuthGuard)
-export class ClustersController {
-  constructor(private readonly clustersService: ClustersService) {}
-
-  @Get()
-  async findAll(@Request() req: any) {
-    return this.clustersService.findAll(req.user.id);
+export class ClustersController extends UserOwnedController<Cluster> {
+  constructor(private readonly clustersService: ClustersService) {
+    super(clustersService);
   }
 
   @Post()
@@ -40,11 +37,6 @@ export class ClustersController {
   @UsePipes(ValidationPipe)
   async test(@Body() createClusterDto: CreateClusterDto) {
     return this.clustersService.testConnection(createClusterDto);
-  }
-
-  @Get(':id')
-  async findOne(@Request() req: any, @Param('id') id: string) {
-    return this.clustersService.findOne(id, req.user.id);
   }
 
   @Get(':id/tables')
@@ -140,10 +132,6 @@ export class ClustersController {
     );
   }
 
-  @Delete(':id')
-  async remove(@Request() req: any, @Param('id') id: string) {
-    return this.clustersService.remove(id, req.user.id);
-  }
 
   @Post(':id/query')
   async executeQuery(

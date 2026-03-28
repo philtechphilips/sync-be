@@ -1,4 +1,4 @@
-import { IsOptional, IsString, Length } from 'class-validator';
+import { IsOptional, IsString, Length, IsObject } from 'class-validator';
 
 export class UpdateProfileDto {
   @IsString()
@@ -9,4 +9,8 @@ export class UpdateProfileDto {
   @IsString()
   @IsOptional()
   profile_picture?: string;
+
+  @IsObject()
+  @IsOptional()
+  settings?: Record<string, any>;
 }

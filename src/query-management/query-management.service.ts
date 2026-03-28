@@ -3,11 +3,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SavedQuery } from './entities/saved-query.entity';
 import { Collection } from './entities/collection.entity';
-import {
-  CreateSavedQueryDto,
-  UpdateSavedQueryDto,
-} from './dto/saved-query.dto';
+import { CreateSavedQueryDto, UpdateSavedQueryDto } from './dto/saved-query.dto';
 import { CreateCollectionDto, UpdateCollectionDto } from './dto/collection.dto';
+import { UserOwnedService } from '../common/services/user-owned.service';
 
 @Injectable()
 export class QueryManagementService {
@@ -21,10 +19,7 @@ export class QueryManagementService {
   // --- Saved Queries ---
 
   async createQuery(userId: string, dto: CreateSavedQueryDto) {
-    const query = this.queryRepo.create({
-      ...dto,
-      userId,
-    });
+    const query = this.queryRepo.create({ ...dto, userId });
     return this.queryRepo.save(query);
   }
 
@@ -59,10 +54,7 @@ export class QueryManagementService {
   // --- Collections ---
 
   async createCollection(userId: string, dto: CreateCollectionDto) {
-    const collection = this.collectionRepo.create({
-      ...dto,
-      userId,
-    });
+    const collection = this.collectionRepo.create({ ...dto, userId });
     return this.collectionRepo.save(collection);
   }
 
@@ -91,7 +83,6 @@ export class QueryManagementService {
 
   async removeCollection(id: string, userId: string) {
     const collection = await this.findOneCollection(id, userId);
-    // Note: TypeORM relation is set to CASCADE for children, but queries are SET NULL
     return this.collectionRepo.remove(collection);
   }
 

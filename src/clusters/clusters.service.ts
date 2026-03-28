@@ -9,26 +9,23 @@ import { QueryLog } from './entities/query-log.entity';
 import { CreateClusterDto } from './dto/create-cluster.dto';
 import { CryptographyService } from '../common/services/cryptography.service';
 
-export interface PaginatedResponse<T> {
-  data: T[];
-  total: number;
-  page: number;
-  limit: number;
-}
+import { UserOwnedService } from '../common/services/user-owned.service';
 
 @Injectable()
-export class ClustersService {
+export class ClustersService extends UserOwnedService<Cluster> {
   private mysqlPools = new Map<string, mysql.Pool>();
   private pgPools = new Map<string, any>();
   private mssqlPools = new Map<string, mssql.ConnectionPool>();
 
   constructor(
     @InjectRepository(Cluster)
-    private readonly clusterRepo: Repository<Cluster>,
+    clusterRepo: Repository<Cluster>,
     @InjectRepository(QueryLog)
     private readonly queryLogRepo: Repository<QueryLog>,
     private readonly cryptographyService: CryptographyService,
-  ) {}
+  ) {
+    super(clusterRepo, 'Cluster');
+  }
 
   private getMySQLPool(cluster: Cluster): mysql.Pool {
     const { id, host, port, username, database, password } = cluster;
@@ -126,29 +123,6 @@ export class ClustersService {
     }
   }
 
-  async findAll(userId: string): Promise<Cluster[]> {
-    const clusters = await this.clusterRepo.find({
-      where: { userId },
-      order: { createdAt: 'DESC' },
-    });
-    return clusters.map((c) => this.decryptCluster(c));
-  }
-
-  async findOne(id: string, userId: string): Promise<Cluster> {
-    const cluster = await this.clusterRepo.findOne({ where: { id, userId } });
-    if (!cluster) throw new BadRequestException('Cluster not found!');
-    return this.decryptCluster(cluster);
-  }
-
-  // Internal use only — returns full decrypted credentials for DB connections
-  private async findClusterForConnection(
-    id: string,
-    userId: string,
-  ): Promise<Cluster> {
-    const cluster = await this.clusterRepo.findOne({ where: { id, userId } });
-    if (!cluster) throw new BadRequestException('Cluster not found!');
-    return this.decryptCluster(cluster);
-  }
 
   async testConnection(createClusterDto: CreateClusterDto) {
     const { type, host, port, username, password, database } = createClusterDto;
@@ -211,9 +185,23 @@ export class ClustersService {
     throw new BadRequestException('Invalid database type!');
   }
 
+  private async findClusterForConnection(id: string, userId: string) {
+    return this.findOne(id, userId);
+  }
+
+  async findAll(userId: string): Promise<Cluster[]> {
+    const clusters = await super.findAll(userId);
+    return clusters.map((c) => this.decryptCluster(c));
+  }
+
+  async findOne(id: string, userId: string): Promise<Cluster> {
+    const cluster = await super.findOne(id, userId);
+    return this.decryptCluster(cluster);
+  }
+
   async create(userId: string, createClusterDto: CreateClusterDto) {
     await this.testConnection(createClusterDto);
-    const cluster = this.clusterRepo.create({
+    const cluster = this.repository.create({
       ...createClusterDto,
       name: this.cryptographyService.encrypt(createClusterDto.name) as string,
       host: this.cryptographyService.encrypt(createClusterDto.host) as string,
@@ -228,7 +216,7 @@ export class ClustersService {
       ) as string,
       userId,
     });
-    const saved = await this.clusterRepo.save(cluster);
+    const saved = await this.repository.save(cluster);
     return this.decryptCluster(saved);
   }
 
@@ -727,8 +715,7 @@ export class ClustersService {
           );
         }
       }
-    }
- catch (error) {
+    } catch (error) {
       success = false;
       errorMessage = error.message;
       throw new BadRequestException(error.message);
@@ -754,14 +741,12 @@ export class ClustersService {
   }
 
   async remove(id: string, userId: string) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    await this.clusterRepo.remove(cluster);
+    const cluster = await this.findOne(id, userId);
+    await this.repository.remove(cluster);
   }
 
   async dropTable(clusterId: string, userId: string, tableName: string) {
-    const cluster = await this.clusterRepo.findOne({
-      where: { id: clusterId, user: { id: userId } },
-    });
+    const cluster = await this.findOne(clusterId, userId);
     if (!cluster) throw new Error('Cluster not found');
 
     let sql = '';

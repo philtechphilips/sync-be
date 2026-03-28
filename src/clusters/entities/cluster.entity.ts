@@ -1,14 +1,6 @@
-import {
-  Entity,
-  Column,
-  PrimaryGeneratedColumn,
-  CreateDateColumn,
-  UpdateDateColumn,
-  ManyToOne,
-  JoinColumn,
-} from 'typeorm';
+import { Entity, Column } from 'typeorm';
 import { Exclude, Expose } from 'class-transformer';
-import { User } from '../../auth/entities/user.entity';
+import { UserOwnedEntity } from '../../common/entities/user-owned.entity';
 
 export enum ClusterType {
   MYSQL = 'mysql',
@@ -24,11 +16,7 @@ export enum ClusterEnvironment {
 
 @Exclude()
 @Entity('clusters')
-export class Cluster {
-  @Expose()
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
+export class Cluster extends UserOwnedEntity {
   @Expose()
   @Column({ type: 'text' })
   name: string;
@@ -57,13 +45,6 @@ export class Cluster {
   @Column({ type: 'text' })
   database: string;
 
-  @Column()
-  userId: string;
-
-  @ManyToOne(() => User)
-  @JoinColumn({ name: 'userId' })
-  user: User;
-
   @Expose()
   @Column({
     type: 'enum',
@@ -75,12 +56,4 @@ export class Cluster {
   @Expose()
   @Column({ type: 'text', nullable: true })
   color: string;
-
-  @Expose()
-  @CreateDateColumn({ name: 'created_at' })
-  createdAt: Date;
-
-  @Expose()
-  @UpdateDateColumn({ name: 'updated_at' })
-  updatedAt: Date;
 }
