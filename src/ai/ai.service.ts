@@ -5,7 +5,7 @@ import { ClusterType } from '../clusters/entities/cluster.entity';
 
 @Injectable()
 export class AIService {
-  private openai: OpenAI;
+  private readonly openai: OpenAI;
 
   constructor(private readonly clustersService: ClustersService) {
     this.openai = new OpenAI({

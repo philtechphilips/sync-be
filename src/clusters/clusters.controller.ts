@@ -78,8 +78,8 @@ export class ClustersController extends UserOwnedController<Cluster> {
       id,
       req.user.id,
       tableName,
-      page ? parseInt(page) : 1,
-      limit ? parseInt(limit) : 100,
+      page ? Number.parseInt(page) : 1,
+      limit ? Number.parseInt(limit) : 100,
       parsedFilters,
     );
   }

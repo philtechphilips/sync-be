@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-const { spawnSync } = require('child_process');
-const path = require('path');
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
 
 // Get migration name from command line arguments
 const migrationName = process.argv[2];
@@ -61,6 +61,7 @@ try {
   if (gen.status !== 0) process.exit(gen.status || 1);
   
 } catch (error) {
+  console.error('Unexpected error:', error);
   process.exit(1);
 }
 

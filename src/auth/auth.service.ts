@@ -22,7 +22,7 @@ import { EmailService } from '../common/services/email.service';
 @Injectable()
 export class AuthService {
   constructor(
-    private jwtService: JwtService,
+    private readonly jwtService: JwtService,
     private readonly authRepo: AuthRepo,
     private readonly emailService: EmailService,
   ) {}
@@ -60,39 +60,29 @@ export class AuthService {
 
       return this.generateAuthResponse(findUser);
     } catch (error) {
+      console.error('Refresh token error:', error);
       throw new UnauthorizedException('Invalid refresh token!');
     }
   }
 
   async create(registerDto: RegisterAuthDto) {
-    try {
-      const existingUser = await this.authRepo.findOne({
-        email: registerDto.email,
-      });
+    const existingUser = await this.authRepo.findOne({
+      email: registerDto.email,
+    });
 
-      if (existingUser) {
-        throw new BadRequestException('Account with this details exist!');
-      }
-      const password = await hashPassword(registerDto.password);
-      registerDto.password = password;
-      return await this.authRepo.create(registerDto);
-    } catch (error) {
-      console.log(error);
-      throw error;
+    if (existingUser) {
+      throw new BadRequestException('Account with this details exist!');
     }
+    const password = await hashPassword(registerDto.password);
+    registerDto.password = password;
+    return await this.authRepo.create(registerDto);
   }
 
   async update(id: string, updateAuthDto: UpdateAuthDto) {
-    try {
-      const findUser = await this.findUserOrThrow(id);
-
-      Object.assign(findUser, updateAuthDto);
-
-      await this.authRepo.save(findUser);
-      return this.getSafeUser(findUser);
-    } catch (error) {
-      throw error;
-    }
+    const findUser = await this.findUserOrThrow(id);
+    Object.assign(findUser, updateAuthDto);
+    await this.authRepo.save(findUser);
+    return this.getSafeUser(findUser);
   }
 
   async updateProfile(id: string, dto: UpdateProfileDto) {
@@ -335,6 +325,7 @@ export class AuthService {
       try {
         decoded = this.jwtService.verify(resetPasswordDto.token);
       } catch (error) {
+        console.error('JWT verification error during password reset:', error);
         throw new BadRequestException('Invalid or expired reset token');
       }
 
@@ -406,16 +397,16 @@ export class AuthService {
 
     // Parse expiration string (e.g., "7d", "7 days", "14d", "30d", "3600s", "1h", etc.)
     if (expirationStr.endsWith('d') || expirationStr.includes('day')) {
-      const days = parseInt(expirationStr) || 7;
+      const days = Number.parseInt(expirationStr) || 7;
       expiryDate.setDate(expiryDate.getDate() + days);
     } else if (expirationStr.endsWith('h') || expirationStr.includes('hour')) {
-      const hours = parseInt(expirationStr) || 1;
+      const hours = Number.parseInt(expirationStr) || 1;
       expiryDate.setHours(expiryDate.getHours() + hours);
     } else if (expirationStr.endsWith('m') || expirationStr.includes('min')) {
-      const minutes = parseInt(expirationStr) || 15;
+      const minutes = Number.parseInt(expirationStr) || 15;
       expiryDate.setMinutes(expiryDate.getMinutes() + minutes);
     } else if (expirationStr.endsWith('s') || expirationStr.includes('sec')) {
-      const seconds = parseInt(expirationStr) || 3600;
+      const seconds = Number.parseInt(expirationStr) || 3600;
       expiryDate.setSeconds(expiryDate.getSeconds() + seconds);
     } else {
       // Default to 7 days if format is not recognized

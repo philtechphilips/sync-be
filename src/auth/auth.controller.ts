@@ -56,7 +56,7 @@ export class AuthController {
         message: 'User logged in successfully!',
       };
     } catch (error) {
-      console.log(error);
+      console.error('Login error:', error);
       throw error;
     }
   }
@@ -77,6 +77,7 @@ export class AuthController {
           HttpStatus.UNAUTHORIZED,
         );
       }
+      console.error('Token refresh error:', error);
       throw new HttpException(
         { success: false, message: 'Something went wrong!' },
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -102,6 +103,7 @@ export class AuthController {
           HttpStatus.BAD_REQUEST,
         );
       } else {
+        console.error('Registration error:', error);
         throw new HttpException(
           { success: false, message: 'Something went wrong!' },
           HttpStatus.INTERNAL_SERVER_ERROR,
@@ -117,6 +119,7 @@ export class AuthController {
       const authUrl = this.authService.getGoogleAuthUrl();
       res.redirect(authUrl);
     } catch (error) {
+      console.error('Google OAuth initialization error:', error);
       throw new HttpException(
         { success: false, message: 'Failed to initiate Google OAuth' },
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -196,6 +199,7 @@ export class AuthController {
           HttpStatus.BAD_REQUEST,
         );
       }
+      console.error('Forgot password error:', error);
       throw new HttpException(
         { success: false, message: 'Something went wrong!' },
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -216,6 +220,7 @@ export class AuthController {
           HttpStatus.BAD_REQUEST,
         );
       }
+      console.error('Reset password error:', error);
       throw new HttpException(
         { success: false, message: 'Something went wrong!' },
         HttpStatus.INTERNAL_SERVER_ERROR,
