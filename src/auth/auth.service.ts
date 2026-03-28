@@ -33,7 +33,8 @@ export class AuthService {
     if (!findUser) throw new HttpException('Invalid credentials!', 400);
 
     const isPasswordValid = await validatePassword(password, findUser.password);
-    if (!isPasswordValid) throw new UnauthorizedException('Invalid credentials!');
+    if (!isPasswordValid)
+      throw new UnauthorizedException('Invalid credentials!');
 
     return this.generateAuthResponse(findUser);
   }
@@ -209,9 +210,7 @@ export class AuthService {
   }) {
     let user = await this.authRepo.findOne({ google_id: googleUserInfo.id });
 
-    if (!user) {
-      user = await this.authRepo.findOne({ email: googleUserInfo.email });
-    }
+    user ??= await this.authRepo.findOne({ email: googleUserInfo.email });
 
     if (user) {
       let updated = false;
@@ -220,7 +219,10 @@ export class AuthService {
         user.provider = 'google';
         updated = true;
       }
-      if (googleUserInfo.picture && user.profile_picture !== googleUserInfo.picture) {
+      if (
+        googleUserInfo.picture &&
+        user.profile_picture !== googleUserInfo.picture
+      ) {
         user.profile_picture = googleUserInfo.picture;
         updated = true;
       }

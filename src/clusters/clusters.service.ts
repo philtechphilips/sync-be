@@ -1184,7 +1184,11 @@ export class ClustersService extends UserOwnedService<Cluster> {
     targetType: ClusterType,
     withData: boolean,
   ) {
-    const { dropDdl, createDdl } = this.getSyncDDL(tableName, columns, targetType);
+    const { dropDdl, createDdl } = this.getSyncDDL(
+      tableName,
+      columns,
+      targetType,
+    );
     let success = true;
     let error = null;
 
@@ -1203,7 +1207,11 @@ export class ClustersService extends UserOwnedService<Cluster> {
     return { tableName, success, error };
   }
 
-  private getSyncDDL(tableName: string, columns: any[], targetType: ClusterType) {
+  private getSyncDDL(
+    tableName: string,
+    columns: any[],
+    targetType: ClusterType,
+  ) {
     let dropDdl = '';
     let createDdl = '';
 
@@ -1413,7 +1421,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
           if (val === null) return '';
           const str = String(val);
           return str.includes(',') || str.includes('"')
-            ? `"${str.replaceAll(/"/g, '""')}"`
+            ? `"${str.replaceAll('"', '""')}"`
             : str;
         })
         .join(','),
