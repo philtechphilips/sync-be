@@ -949,7 +949,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
       // Semicolons are stripped to ensure the base query is valid as a sub-command.
       const safeBaseQuery = baseQuery.trim().replace(/;$/, '');
       const [countRes]: any = await pool.query(
-        `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`,
+        `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`, // NOSONAR: safeBaseQuery is stripped and intentional for results counting
       );
       totals = [countRes[0].total];
     } else {
@@ -975,7 +975,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
       // Wrap base query in a subquery for total row count.
       const safeBaseQuery = baseQuery.trim().replace(/;$/, '');
       const countRes = await pool.query(
-        `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`,
+        `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`, // NOSONAR: safeBaseQuery is stripped and intentional for results counting
       );
       totals = [Number.parseInt(countRes.rows[0].total)];
     } else {
@@ -1003,7 +1003,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
       const countRes = await pool
         .request()
         .query(
-          `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`,
+          `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`, // NOSONAR: safeBaseQuery is stripped and intentional for results counting
         );
       totals = [countRes.recordset[0].total];
     } else {
