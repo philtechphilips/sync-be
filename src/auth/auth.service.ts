@@ -28,87 +28,28 @@ export class AuthService {
   ) {}
 
   async validateUser({ email, password }: LoginAuthDto) {
-    try {
-      const findUser = await this.authRepo.findOne({ email });
+    const findUser = await this.authRepo.findOne({ email });
 
-      if (!findUser) throw new HttpException('Invalid credentials!', 400);
-      const decryptPassword = await validatePassword(
-        password,
-        findUser.password,
-      );
+    if (!findUser) throw new HttpException('Invalid credentials!', 400);
 
-      if (!decryptPassword) {
-        throw new UnauthorizedException('Invalid credentials!');
-      }
+    const isPasswordValid = await validatePassword(password, findUser.password);
+    if (!isPasswordValid) throw new UnauthorizedException('Invalid credentials!');
 
-      const { password: _, ...user } = findUser;
-
-      // Generate access token
-      const accessToken = this.jwtService.sign(
-        {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          full_name: user.full_name,
-          profile_picture: user.profile_picture,
-        },
-        { expiresIn: config.JWT.ACCESS_EXPIRATION },
-      );
-
-      // Generate refresh token
-      const refreshToken = this.jwtService.sign(
-        {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          full_name: user.full_name,
-          profile_picture: user.profile_picture,
-        },
-        {
-          secret: config.JWT.REFRESH_SECRET,
-          expiresIn: config.JWT.REFRESH_EXPIRATION,
-        },
-      );
-
-      // Calculate refresh token expiry date from JWT expiration format
-      const refreshTokenExpiry = this.calculateTokenExpiry(
-        config.JWT.REFRESH_EXPIRATION,
-      );
-
-      // Save refresh token to database
-      findUser.refresh_token = refreshToken;
-      findUser.refresh_token_expiry = refreshTokenExpiry;
-      findUser.access_token = accessToken;
-      await this.authRepo.save(findUser);
-
-      return {
-        ...user,
-        access_token: accessToken,
-        refresh_token: refreshToken,
-      };
-    } catch (error) {
-      console.log(error);
-      throw error;
-    }
+    return this.generateAuthResponse(findUser);
   }
 
   async refreshToken(refreshToken: string) {
     try {
-      // Verify refresh token
-      const decoded = this.jwtService.verify(refreshToken, {
+      this.jwtService.verify(refreshToken, {
         secret: config.JWT.REFRESH_SECRET,
       });
 
-      // Find user by refresh token
       const findUser = await this.authRepo.findOne({
         refresh_token: refreshToken,
       });
 
-      if (!findUser) {
-        throw new UnauthorizedException('Invalid refresh token!');
-      }
+      if (!findUser) throw new UnauthorizedException('Invalid refresh token!');
 
-      // Check if refresh token has expired
       if (
         findUser.refresh_token_expiry &&
         findUser.refresh_token_expiry < new Date()
@@ -116,51 +57,7 @@ export class AuthService {
         throw new UnauthorizedException('Refresh token has expired!');
       }
 
-      const { password: _, ...user } = findUser;
-
-      // Generate new access token
-      const accessToken = this.jwtService.sign(
-        {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          full_name: user.full_name,
-          profile_picture: user.profile_picture,
-        },
-        { expiresIn: config.JWT.ACCESS_EXPIRATION },
-      );
-
-      // Generate new refresh token
-      const newRefreshToken = this.jwtService.sign(
-        {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          full_name: user.full_name,
-          profile_picture: user.profile_picture,
-        },
-        {
-          secret: config.JWT.REFRESH_SECRET,
-          expiresIn: config.JWT.REFRESH_EXPIRATION,
-        },
-      );
-
-      // Calculate refresh token expiry date from JWT expiration format
-      const refreshTokenExpiry = this.calculateTokenExpiry(
-        config.JWT.REFRESH_EXPIRATION,
-      );
-
-      // Update both tokens in database
-      findUser.access_token = accessToken;
-      findUser.refresh_token = newRefreshToken;
-      findUser.refresh_token_expiry = refreshTokenExpiry;
-      await this.authRepo.save(findUser);
-
-      return {
-        ...user,
-        access_token: accessToken,
-        refresh_token: newRefreshToken,
-      };
+      return this.generateAuthResponse(findUser);
     } catch (error) {
       throw new UnauthorizedException('Invalid refresh token!');
     }
@@ -238,174 +135,21 @@ export class AuthService {
 
   async handleGoogleCallback(code: string) {
     try {
-      // Exchange authorization code for tokens
-      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          code,
-          client_id: config.GOOGLE.CLIENT_ID,
-          client_secret: config.GOOGLE.CLIENT_SECRET,
-          redirect_uri: config.GOOGLE.REDIRECT_URI,
-          grant_type: 'authorization_code',
-        }),
-      });
+      const accessToken = await this.exchangeGoogleCodeForToken(code);
+      const googleUserInfo = await this.fetchGoogleUserInfo(accessToken);
 
-      if (!tokenResponse.ok) {
-        const errorData: any = await tokenResponse.json();
-        throw new UnauthorizedException(
-          errorData.error_description || 'Failed to exchange code for tokens',
-        );
-      }
-
-      const tokenData: any = await tokenResponse.json();
-      const { access_token } = tokenData;
-
-      // Get user info from Google
-      const userInfoResponse = await fetch(
-        'https://www.googleapis.com/oauth2/v2/userinfo',
-        {
-          headers: {
-            Authorization: `Bearer ${access_token}`,
-          },
-        },
-      );
-
-      if (!userInfoResponse.ok) {
-        throw new UnauthorizedException(
-          'Failed to fetch user info from Google',
-        );
-      }
-
-      const googleUserInfo: {
-        id: string;
-        email: string;
-        name?: string;
-        picture?: string;
-        verified_email?: boolean;
-      } = (await userInfoResponse.json()) as any;
-
-      // Validate email
       if (!googleUserInfo.email) {
         throw new BadRequestException('Email is required from Google account!');
       }
 
-      // Check if user exists by google_id first, then by email
-      let existingUser = await this.authRepo.findOne({
-        google_id: googleUserInfo.id,
-      });
-
-      if (!existingUser) {
-        existingUser = await this.authRepo.findOne({
-          email: googleUserInfo.email,
-        });
-      }
-
-      // If user exists but doesn't have google_id, update it
-      if (existingUser && !existingUser.google_id) {
-        existingUser.google_id = googleUserInfo.id;
-        existingUser.provider = 'google';
-        if (googleUserInfo.picture && !existingUser.profile_picture) {
-          existingUser.profile_picture = googleUserInfo.picture;
-        }
-        if (googleUserInfo.name && !existingUser.full_name) {
-          existingUser.full_name = googleUserInfo.name;
-        }
-        await this.authRepo.save(existingUser);
-      }
-
-      // Update profile picture and name if they've changed
-      if (existingUser && existingUser.google_id === googleUserInfo.id) {
-        let updated = false;
-        if (
-          googleUserInfo.picture &&
-          existingUser.profile_picture !== googleUserInfo.picture
-        ) {
-          existingUser.profile_picture = googleUserInfo.picture;
-          updated = true;
-        }
-        if (
-          googleUserInfo.name &&
-          existingUser.full_name !== googleUserInfo.name
-        ) {
-          existingUser.full_name = googleUserInfo.name;
-          updated = true;
-        }
-        if (updated) {
-          await this.authRepo.save(existingUser);
-        }
-      }
-
-      // If user doesn't exist, create new user
-      if (!existingUser) {
-        existingUser = await this.authRepo.create({
-          email: googleUserInfo.email,
-          full_name: googleUserInfo.name || undefined,
-          profile_picture: googleUserInfo.picture || undefined,
-          provider: 'google',
-          google_id: googleUserInfo.id,
-          requires_password: false,
-          role: 'user',
-        });
-      }
-
-      const { password: _, ...user } = existingUser;
-
-      // Generate access token
-      const accessToken = this.jwtService.sign(
-        {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          full_name: user.full_name,
-          profile_picture: user.profile_picture,
-        },
-        { expiresIn: config.JWT.ACCESS_EXPIRATION },
-      );
-
-      // Generate refresh token
-      const refreshToken = this.jwtService.sign(
-        {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-          full_name: user.full_name,
-          profile_picture: user.profile_picture,
-        },
-        {
-          secret: config.JWT.REFRESH_SECRET,
-          expiresIn: config.JWT.REFRESH_EXPIRATION,
-        },
-      );
-
-      // Calculate refresh token expiry date
-      const refreshTokenExpiry = this.calculateTokenExpiry(
-        config.JWT.REFRESH_EXPIRATION,
-      );
-
-      // Save tokens to database
-      existingUser.refresh_token = refreshToken;
-      existingUser.refresh_token_expiry = refreshTokenExpiry;
-      existingUser.access_token = accessToken;
-      await this.authRepo.save(existingUser);
-
-      return {
-        id: user.id,
-        email: user.email,
-        full_name: user.full_name,
-        role: user.role,
-        profile_picture: user.profile_picture,
-        access_token: accessToken,
-        refresh_token: refreshToken,
-      };
+      const user = await this.getOrCreateGoogleUser(googleUserInfo);
+      return this.generateAuthResponse(user);
     } catch (error) {
       console.log(error);
-      if (error instanceof UnauthorizedException) {
-        throw error;
-      }
-      if (error instanceof BadRequestException) {
+      if (
+        error instanceof UnauthorizedException ||
+        error instanceof BadRequestException
+      ) {
         throw error;
       }
       throw new HttpException(
@@ -413,6 +157,125 @@ export class AuthService {
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
+  }
+
+  private async exchangeGoogleCodeForToken(code: string): Promise<string> {
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: config.GOOGLE.CLIENT_ID,
+        client_secret: config.GOOGLE.CLIENT_SECRET,
+        redirect_uri: config.GOOGLE.REDIRECT_URI,
+        grant_type: 'authorization_code',
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const errorData: any = await tokenResponse.json();
+      throw new UnauthorizedException(
+        errorData.error_description || 'Failed to exchange code for tokens',
+      );
+    }
+
+    const tokenData: any = await tokenResponse.json();
+    return tokenData.access_token;
+  }
+
+  private async fetchGoogleUserInfo(accessToken: string) {
+    const response = await fetch(
+      'https://www.googleapis.com/oauth2/v2/userinfo',
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+
+    if (!response.ok) {
+      throw new UnauthorizedException('Failed to fetch user info from Google');
+    }
+
+    return (await response.json()) as {
+      id: string;
+      email: string;
+      name?: string;
+      picture?: string;
+    };
+  }
+
+  private async getOrCreateGoogleUser(googleUserInfo: {
+    id: string;
+    email: string;
+    name?: string;
+    picture?: string;
+  }) {
+    let user = await this.authRepo.findOne({ google_id: googleUserInfo.id });
+
+    if (!user) {
+      user = await this.authRepo.findOne({ email: googleUserInfo.email });
+    }
+
+    if (user) {
+      let updated = false;
+      if (!user.google_id) {
+        user.google_id = googleUserInfo.id;
+        user.provider = 'google';
+        updated = true;
+      }
+      if (googleUserInfo.picture && user.profile_picture !== googleUserInfo.picture) {
+        user.profile_picture = googleUserInfo.picture;
+        updated = true;
+      }
+      if (googleUserInfo.name && user.full_name !== googleUserInfo.name) {
+        user.full_name = googleUserInfo.name;
+        updated = true;
+      }
+      if (updated) await this.authRepo.save(user);
+      return user;
+    }
+
+    return this.authRepo.create({
+      email: googleUserInfo.email,
+      full_name: googleUserInfo.name || undefined,
+      profile_picture: googleUserInfo.picture || undefined,
+      provider: 'google',
+      google_id: googleUserInfo.id,
+      requires_password: false,
+      role: 'user',
+    });
+  }
+
+  private async generateAuthResponse(user: any) {
+    const payload = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      full_name: user.full_name,
+      profile_picture: user.profile_picture,
+    };
+
+    const accessToken = this.jwtService.sign(payload, {
+      expiresIn: config.JWT.ACCESS_EXPIRATION,
+    });
+
+    const refreshToken = this.jwtService.sign(payload, {
+      secret: config.JWT.REFRESH_SECRET,
+      expiresIn: config.JWT.REFRESH_EXPIRATION,
+    });
+
+    const refreshTokenExpiry = this.calculateTokenExpiry(
+      config.JWT.REFRESH_EXPIRATION,
+    );
+
+    user.refresh_token = refreshToken;
+    user.refresh_token_expiry = refreshTokenExpiry;
+    user.access_token = accessToken;
+    await this.authRepo.save(user);
+
+    const safeUser = this.getSafeUser(user);
+    return {
+      ...safeUser,
+      access_token: accessToken,
+      refresh_token: refreshToken,
+    };
   }
 
   async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {

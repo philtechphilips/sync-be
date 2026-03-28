@@ -240,9 +240,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
       return res.rows.map((row: any) => ({ name: row.table_name }));
     } else if (type === ClusterType.MSSQL) {
       const pool = await this.getMSSQLPool(cluster);
-      const result = await pool.request()
-        .input('database', mssql.VarChar, database)
-        .query(`
+      const result = await pool
+        .request()
+        .input('database', mssql.VarChar, database).query(`
         SELECT TABLE_NAME as name FROM INFORMATION_SCHEMA.TABLES 
         WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_CATALOG = @database
         ORDER BY TABLE_NAME ASC
@@ -362,9 +362,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
 
   private escapeIdentifier(identifier: string, type: ClusterType): string {
     if (type === ClusterType.MYSQL) {
-      return `\`${identifier.replaceAll(/`/g, '``')}\``;
+      return `\`${identifier.replaceAll('`', '``')}\``;
     } else {
-      return `"${identifier.replaceAll(/"/g, '""')}"`;
+      return `"${identifier.replaceAll('"', '""')}"`;
     }
   }
 
@@ -428,16 +428,10 @@ export class ClustersService extends UserOwnedService<Cluster> {
     limit: number,
     offset: number,
   ) {
-    const { where, params } = this.buildWhereClause(
-      ClusterType.MYSQL,
-      filters,
-    );
-    const sql = [
-      'SELECT * FROM',
-      escapedTableName,
-      where,
-      'LIMIT ? OFFSET ?',
-    ].filter(Boolean).join(' ');
+    const { where, params } = this.buildWhereClause(ClusterType.MYSQL, filters);
+    const sql = ['SELECT * FROM', escapedTableName, where, 'LIMIT ? OFFSET ?']
+      .filter(Boolean)
+      .join(' ');
 
     const pool = this.getMySQLPool(cluster);
     const [rows] = await pool.query(sql, [
@@ -470,7 +464,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
       escapedTableName,
       where,
       `LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-    ].filter(Boolean).join(' ');
+    ]
+      .filter(Boolean)
+      .join(' ');
 
     const pool = this.getPGPool(cluster);
     const res = await pool.query(sql, [...params, limit, offset]);
@@ -481,7 +477,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
     const count = await pool.query(countSql, params);
     return {
       data: res.rows,
-      total: Number.parseInt((count.rows[0] as any).total),
+      total: Number.parseInt(count.rows[0].total),
       page,
       limit,
     };
@@ -513,7 +509,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
       'SELECT COUNT(*) as total FROM',
       escapedTableName,
       where + ';',
-    ].filter(Boolean).join(' ');
+    ]
+      .filter(Boolean)
+      .join(' ');
 
     const result = await request.query(sql);
     const recordsets = result.recordsets as any;
@@ -639,7 +637,10 @@ export class ClustersService extends UserOwnedService<Cluster> {
     where: any,
   ) {
     const set = Object.keys(data)
-      .map((k, i) => `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${i + 1}`)
+      .map(
+        (k, i) =>
+          `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${i + 1}`,
+      )
       .join(', ');
     const cond = Object.keys(where)
       .map(
@@ -708,7 +709,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
     data: any,
   ) {
     const keys = Object.keys(data);
-    const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.MYSQL)).join(', ');
+    const cols = keys
+      .map((k) => this.escapeIdentifier(k, ClusterType.MYSQL))
+      .join(', ');
     const placeholders = keys.map(() => '?').join(', ');
     const [result] = await this.getMySQLPool(cluster).query(
       `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`,
@@ -723,7 +726,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
     data: any,
   ) {
     const keys = Object.keys(data);
-    const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES)).join(', ');
+    const cols = keys
+      .map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES))
+      .join(', ');
     const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
     const res = await this.getPGPool(cluster).query(
       `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}) RETURNING *`,
@@ -797,7 +802,10 @@ export class ClustersService extends UserOwnedService<Cluster> {
     where: any,
   ) {
     const cond = Object.keys(where)
-      .map((k, i) => `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${i + 1}`)
+      .map(
+        (k, i) =>
+          `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${i + 1}`,
+      )
       .join(' AND ');
     const res = await this.getPGPool(cluster).query(
       `DELETE FROM ${escapedTableName} WHERE ${cond}`,
@@ -893,7 +901,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
 
     let execQuery = query;
     if (usePagination) {
-      const offset = (page! - 1) * limit!;
+      const offset = (page - 1) * limit;
       if (cluster.type === ClusterType.MSSQL) {
         execQuery = `SELECT * FROM (${baseQuery}) AS __synq_sub ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
       } else {
@@ -995,7 +1003,6 @@ export class ClustersService extends UserOwnedService<Cluster> {
     }
     return { results, totals };
   }
-
 
   async getQueryLogs(clusterId: string, userId: string) {
     return this.queryLogRepo.find({
@@ -1149,53 +1156,86 @@ export class ClustersService extends UserOwnedService<Cluster> {
     const sourceTables = this.groupByTable(sourceSchema);
 
     const syncResults = [];
-
     for (const tableName of tableNames) {
       const columns = sourceTables[tableName];
       if (!columns) continue;
 
-      let ddl = '';
-      let dropDdl = '';
-      if (targetCluster.type === ClusterType.MYSQL) {
-        dropDdl = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.MYSQL)};`;
-        ddl = this.generateMySQLCreateTable(tableName, columns);
-      } else if (targetCluster.type === ClusterType.POSTGRES) {
-        dropDdl = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} CASCADE;`;
-        ddl = this.generatePostgresCreateTable(tableName, columns);
-      }
-
-      let success = true;
-      let error = null;
-
-      if (ddl) {
-        try {
-          if (dropDdl) await this.executeQuery(targetId, userId, dropDdl);
-          await this.executeQuery(targetId, userId, ddl);
-
-          if (withData) {
-            const sourceData = await this.findTableData(
-              sourceId,
-              userId,
-              tableName,
-              1,
-              1000,
-            );
-            if (sourceData && sourceData.data) {
-              for (const row of sourceData.data) {
-                await this.insertTableData(targetId, userId, tableName, row);
-              }
-            }
-          }
-        } catch (e) {
-          success = false;
-          error = e.message;
-        }
-      }
-
-      syncResults.push({ tableName, success, error });
+      const result = await this.syncSingleTable(
+        sourceId,
+        targetId,
+        userId,
+        tableName,
+        columns,
+        targetCluster.type,
+        withData,
+      );
+      syncResults.push(result);
     }
 
     return syncResults;
+  }
+
+  private async syncSingleTable(
+    sourceId: string,
+    targetId: string,
+    userId: string,
+    tableName: string,
+    columns: any[],
+    targetType: ClusterType,
+    withData: boolean,
+  ) {
+    const { dropDdl, createDdl } = this.getSyncDDL(tableName, columns, targetType);
+    let success = true;
+    let error = null;
+
+    try {
+      if (dropDdl) await this.executeQuery(targetId, userId, dropDdl);
+      if (createDdl) await this.executeQuery(targetId, userId, createDdl);
+
+      if (withData && createDdl) {
+        await this.syncTableData(sourceId, targetId, userId, tableName);
+      }
+    } catch (e) {
+      success = false;
+      error = e.message;
+    }
+
+    return { tableName, success, error };
+  }
+
+  private getSyncDDL(tableName: string, columns: any[], targetType: ClusterType) {
+    let dropDdl = '';
+    let createDdl = '';
+
+    if (targetType === ClusterType.MYSQL) {
+      dropDdl = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.MYSQL)};`;
+      createDdl = this.generateMySQLCreateTable(tableName, columns);
+    } else if (targetType === ClusterType.POSTGRES) {
+      dropDdl = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} CASCADE;`;
+      createDdl = this.generatePostgresCreateTable(tableName, columns);
+    }
+
+    return { dropDdl, createDdl };
+  }
+
+  private async syncTableData(
+    sourceId: string,
+    targetId: string,
+    userId: string,
+    tableName: string,
+  ) {
+    const sourceData = await this.findTableData(
+      sourceId,
+      userId,
+      tableName,
+      1,
+      1000,
+    );
+    if (!sourceData?.data) return;
+
+    for (const row of sourceData.data) {
+      await this.insertTableData(targetId, userId, tableName, row);
+    }
   }
 
   private generateMySQLCreateTable(tableName: string, columns: any[]) {
@@ -1225,7 +1265,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
         ) {
           colParts.push(`DEFAULT ${def}`);
         } else {
-          colParts.push(`DEFAULT '${def.replaceAll(/'/g, "''")}'`);
+          colParts.push(`DEFAULT '${def.replaceAll("'", "''")}'`);
         }
       }
 
@@ -1244,7 +1284,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
 
   private generatePostgresCreateTable(tableName: string, columns: any[]) {
     const colStrings = columns.map((c) => {
-      const type = this.sanitizeType((c.udtName || c.type) === 'varchar' ? 'text' : (c.udtName || c.type));
+      const type = this.sanitizeType(
+        (c.udtName || c.type) === 'varchar' ? 'text' : c.udtName || c.type,
+      );
       const colParts = [
         this.escapeIdentifier(c.name, ClusterType.POSTGRES),
         type,
@@ -1264,7 +1306,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
           !upperDef.includes(')')
         ) {
           if (!def.startsWith("'") && isNaN(Number(def))) {
-            colParts.push(`DEFAULT '${def.replaceAll(/'/g, "''")}'`);
+            colParts.push(`DEFAULT '${def.replaceAll("'", "''")}'`);
           } else {
             colParts.push(`DEFAULT ${def}`);
           }
@@ -1290,67 +1332,93 @@ export class ClustersService extends UserOwnedService<Cluster> {
     const schema = await this.getSchema(id, userId);
     const tableSchemas = this.groupByTable(schema);
 
+    if (format === 'sql') {
+      return {
+        content: await this.generateSQLBackup(
+          id,
+          userId,
+          cluster,
+          tables,
+          tableSchemas,
+        ),
+      };
+    }
+
     const backupData: any = {};
-    let sqlOutput = `-- SynqDB Backup\n-- Cluster: ${cluster.name}\n-- Date: ${new Date().toISOString()}\n\n`;
-
     for (const table of tables) {
-      const tableName = table.name;
-      const columns = tableSchemas[tableName];
-      const data = await this.findTableData(id, userId, tableName, 1, 5000);
-
-      if (format === 'sql') {
-        let ddl = '';
-        if (cluster.type === ClusterType.MYSQL) {
-          ddl = this.generateMySQLCreateTable(tableName, columns);
-        } else {
-          ddl = this.generatePostgresCreateTable(tableName, columns);
-        }
-        sqlOutput += `${ddl}\n\n`;
-
-        if (data && data.data.length > 0) {
-          for (const row of data.data) {
-            const keys = Object.keys(row);
-            const cols = keys
-              .map((k) => this.escapeIdentifier(k, cluster.type))
-              .join(', ');
-            const values = Object.values(row)
-              .map((v) => {
-                if (v === null) return 'NULL';
-                if (typeof v === 'string') return `'${v.replaceAll(/'/g, "''")}'`;
-                if (v instanceof Date) return `'${v.toISOString()}'`;
-                return v;
-              })
-              .join(', ');
-            sqlOutput += `INSERT INTO ${this.escapeIdentifier(tableName, cluster.type)} (${cols}) VALUES (${values});\n`;
-          }
-          sqlOutput += '\n';
-        }
-      } else if (format === 'json') {
-        backupData[tableName] = data?.data || [];
+      const data = await this.findTableData(id, userId, table.name, 1, 5000);
+      if (format === 'json') {
+        backupData[table.name] = data?.data || [];
       } else if (format === 'csv') {
-        if (data && data.data && data.data.length > 0) {
-          const headers = Object.keys(data.data[0]);
-          const rows = data.data.map((row: any) =>
-            headers
-              .map((h) => {
-                const val = row[h];
-                if (val === null) return '';
-                const str = String(val);
-                return str.includes(',') || str.includes('"')
-                  ? `"${str.replaceAll(/"/g, '""')}"`
-                  : str;
-              })
-              .join(','),
-          );
-          backupData[tableName] = [headers.join(','), ...rows].join('\n');
-        } else {
-          backupData[tableName] = '';
-        }
+        backupData[table.name] = this.formatCSVData(data?.data || []);
       }
     }
 
-    if (format === 'sql') return { content: sqlOutput };
     return backupData;
+  }
+
+  private async generateSQLBackup(
+    id: string,
+    userId: string,
+    cluster: Cluster,
+    tables: any[],
+    tableSchemas: any,
+  ) {
+    let sql = `-- SynqDB Backup\n-- Cluster: ${cluster.name}\n-- Date: ${new Date().toISOString()}\n\n`;
+
+    for (const table of tables) {
+      const columns = tableSchemas[table.name];
+      const data = await this.findTableData(id, userId, table.name, 1, 5000);
+
+      const ddl =
+        cluster.type === ClusterType.MYSQL
+          ? this.generateMySQLCreateTable(table.name, columns)
+          : this.generatePostgresCreateTable(table.name, columns);
+
+      sql += `${ddl}\n\n`;
+
+      if (data?.data?.length > 0) {
+        sql += this.formatSQLInsert(table.name, data.data, cluster.type);
+        sql += '\n';
+      }
+    }
+    return sql;
+  }
+
+  private formatSQLInsert(tableName: string, rows: any[], type: ClusterType) {
+    return rows
+      .map((row) => {
+        const keys = Object.keys(row);
+        const cols = keys.map((k) => this.escapeIdentifier(k, type)).join(', ');
+        const values = Object.values(row)
+          .map((v) => {
+            if (v === null) return 'NULL';
+            if (typeof v === 'string') return `'${v.replaceAll("'", "''")}'`;
+            if (v instanceof Date) return `'${v.toISOString()}'`;
+            return v;
+          })
+          .join(', ');
+        return `INSERT INTO ${this.escapeIdentifier(tableName, type)} (${cols}) VALUES (${values});`;
+      })
+      .join('\n');
+  }
+
+  private formatCSVData(data: any[]) {
+    if (!data || data.length === 0) return '';
+    const headers = Object.keys(data[0]);
+    const rows = data.map((row: any) =>
+      headers
+        .map((h) => {
+          const val = row[h];
+          if (val === null) return '';
+          const str = String(val);
+          return str.includes(',') || str.includes('"')
+            ? `"${str.replaceAll(/"/g, '""')}"`
+            : str;
+        })
+        .join(','),
+    );
+    return [headers.join(','), ...rows].join('\n');
   }
 
   async restore(
@@ -1359,43 +1427,57 @@ export class ClustersService extends UserOwnedService<Cluster> {
     format: 'sql' | 'csv' | 'json',
     data: any,
   ) {
-    if (format === 'sql') {
-      const queries = (data.content as string)
-        .split(';')
-        .map((q: string) => q.trim())
-        .filter((q: string) => q.length > 0);
-      for (const query of queries) {
-        try {
-          await this.executeQuery(id, userId, query);
-        } catch (e) {
-          console.error(`Failed to execute restore query: ${query}`, e);
-        }
+    if (format === 'sql') return this.restoreSQL(id, userId, data.content);
+    if (format === 'json') return this.restoreJSON(id, userId, data);
+    if (format === 'csv') return this.restoreCSV(id, userId, data);
+  }
+
+  private async restoreSQL(id: string, userId: string, content: string) {
+    const queries = content
+      .split(';')
+      .map((q) => q.trim())
+      .filter((q) => q.length > 0);
+
+    for (const query of queries) {
+      try {
+        await this.executeQuery(id, userId, query);
+      } catch (e) {
+        console.error(`Failed to execute restore query: ${query}`, e);
       }
-      return { success: true };
-    } else if (format === 'json') {
-      for (const tableName of Object.keys(data)) {
-        for (const row of data[tableName] as any[]) {
-          await this.insertTableData(id, userId, tableName, row);
-        }
-      }
-      return { success: true };
-    } else if (format === 'csv') {
-      // Simple CSV restore (assuming headers match)
-      for (const tableName of Object.keys(data)) {
-        const lines = (data[tableName] as string).split('\n');
-        if (lines.length < 2) continue;
-        const headers = lines[0].split(',');
-        for (let i = 1; i < lines.length; i++) {
-          if (!lines[i]) continue;
-          const values = lines[i].split(',');
-          const row: Record<string, any> = {};
-          headers.forEach((h: string, idx: number) => {
-            row[h] = values[idx];
-          });
-          await this.insertTableData(id, userId, tableName, row);
-        }
-      }
-      return { success: true };
     }
+    return { success: true };
+  }
+
+  private async restoreJSON(id: string, userId: string, data: any) {
+    for (const tableName of Object.keys(data)) {
+      for (const row of data[tableName] as any[]) {
+        await this.insertTableData(id, userId, tableName, row);
+      }
+    }
+    return { success: true };
+  }
+
+  private async restoreCSV(id: string, userId: string, data: any) {
+    for (const tableName of Object.keys(data)) {
+      const lines = (data[tableName] as string).split('\n');
+      if (lines.length < 2) continue;
+
+      const headers = lines[0].split(',');
+      for (let i = 1; i < lines.length; i++) {
+        if (!lines[i]) continue;
+        const row = this.parseCSVRow(headers, lines[i]);
+        await this.insertTableData(id, userId, tableName, row);
+      }
+    }
+    return { success: true };
+  }
+
+  private parseCSVRow(headers: string[], line: string) {
+    const values = line.split(',');
+    const row: Record<string, any> = {};
+    headers.forEach((h, idx) => {
+      row[h] = values[idx];
+    });
+    return row;
   }
 }

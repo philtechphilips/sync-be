@@ -1,10 +1,4 @@
-import {
-  Get,
-  Param,
-  Delete,
-  Request,
-  UseGuards,
-} from '@nestjs/common';
+import { Get, Param, Delete, Request, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../../auth/guards/jwt.guard';
 import { UserOwnedService } from '../services/user-owned.service';
 import { UserOwnedEntity } from '../entities/user-owned.entity';
