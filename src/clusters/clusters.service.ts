@@ -1002,7 +1002,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
       const safeBaseQuery = baseQuery.trim().replace(/;$/, '');
       const countRes = await pool
         .request()
-        .query(`SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`);
+        .query(
+          `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`,
+        );
       totals = [countRes.recordset[0].total];
     } else {
       totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
