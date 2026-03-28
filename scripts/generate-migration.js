@@ -42,15 +42,20 @@ const commonOptions = {
 };
 
 try {
+  // Determine the correct npm and npx commands based on the platform.
+  // This allows us to avoid using 'shell: true', which is a security best practice.
+  const isWin = process.platform === 'win32';
+  const npmCmd = isWin ? 'npm.cmd' : 'npm';
+  const npxCmd = isWin ? 'npx.cmd' : 'npx';
+
   // 1. Build the project
   console.log('Building project...');
-  // We use shell: true here because npm run build might depend on shell features or paths
-  const build = spawnSync('npm', ['run', 'build'], { ...commonOptions, shell: true });
+  const build = spawnSync(npmCmd, ['run', 'build'], commonOptions);
   if (build.status !== 0) process.exit(build.status || 1);
 
   // 2. Generate the migration
   console.log(`Generating migration at: ${migrationPath}`);
-  const gen = spawnSync('npx', [
+  const gen = spawnSync(npxCmd, [
     'typeorm',
     'migration:generate',
     '-d', 
