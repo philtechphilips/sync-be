@@ -240,9 +240,11 @@ export class ClustersService extends UserOwnedService<Cluster> {
       return res.rows.map((row: any) => ({ name: row.table_name }));
     } else if (type === ClusterType.MSSQL) {
       const pool = await this.getMSSQLPool(cluster);
-      const result = await pool.request().query(`
+      const result = await pool.request()
+        .input('database', mssql.VarChar, database)
+        .query(`
         SELECT TABLE_NAME as name FROM INFORMATION_SCHEMA.TABLES 
-        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_CATALOG = '${database}'
+        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_CATALOG = @database
         ORDER BY TABLE_NAME ASC
       `);
       return result.recordset;
@@ -358,6 +360,20 @@ export class ClustersService extends UserOwnedService<Cluster> {
     }
   }
 
+  private escapeIdentifier(identifier: string, type: ClusterType): string {
+    if (type === ClusterType.MYSQL) {
+      return `\`${identifier.replaceAll(/`/g, '``')}\``;
+    } else {
+      return `"${identifier.replaceAll(/"/g, '""')}"`;
+    }
+  }
+
+  private sanitizeType(type: string): string {
+    // Column types are untrusted from source DB but should only contain safe characters
+    // (alphanumeric, spaces, parentheses, commas for size/scale)
+    return type.replaceAll(/[^a-zA-Z0-9\s(),]/g, '');
+  }
+
   async findTableData(
     id: string,
     userId: string,
@@ -369,113 +385,209 @@ export class ClustersService extends UserOwnedService<Cluster> {
     const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
     const offset = (page - 1) * limit;
+    const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
 
-    const buildWhere = (type: ClusterType, request?: mssql.Request) => {
-      if (!filters || filters.length === 0) return { where: '', params: [] };
-      const params: any[] = [];
-      const clauses = filters.map((f, i) => {
-        const { column, operator, value } = f;
-        let op = '';
-        let val = value;
-        const col =
-          type === ClusterType.MYSQL ? `\`${column}\`` : `"${column}"`;
-
-        switch (operator) {
-          case 'is':
-            op = '=';
-            break;
-          case 'is_not':
-            op = '!=';
-            break;
-          case 'contains':
-            op = 'LIKE';
-            val = `%${value}%`;
-            break;
-          case 'not_contains':
-            op = 'NOT LIKE';
-            val = `%${value}%`;
-            break;
-          case 'starts_with':
-            op = 'LIKE';
-            val = `${value}%`;
-            break;
-          case 'ends_with':
-            op = 'LIKE';
-            val = `%${value}`;
-            break;
-          case 'gt':
-            op = '>';
-            break;
-          case 'lt':
-            op = '<';
-            break;
-          case 'is_null':
-            return `${col} IS NULL`;
-          case 'is_not_null':
-            return `${col} IS NOT NULL`;
-          default:
-            op = '=';
-        }
-
-        if (type === ClusterType.MSSQL && request) {
-          request.input(`f${i}`, val);
-          return `${col} ${op} @f${i}`;
-        } else if (type === ClusterType.POSTGRES) {
-          params.push(val);
-          return `${col} ${op} $${params.length}`;
-        } else {
-          params.push(val);
-          return `${col} ${op} ?`;
-        }
-      });
-
-      return { where: ' WHERE ' + clauses.join(' AND '), params };
-    };
-
-    if (cluster.type === ClusterType.MYSQL) {
-      const { where, params } = buildWhere(ClusterType.MYSQL);
-      const [rows] = await this.getMySQLPool(cluster).query(
-        `SELECT * FROM \`${tableName}\`${where} LIMIT ? OFFSET ?`,
-        [...params, Number(limit), Number(offset)],
-      );
-      const [count] = await this.getMySQLPool(cluster).query(
-        `SELECT COUNT(*) as total FROM \`${tableName}\`${where}`,
-        params,
-      );
-      return { data: rows, total: (count as any)[0].total, page, limit };
-    } else if (cluster.type === ClusterType.POSTGRES) {
-      const { where, params } = buildWhere(ClusterType.POSTGRES);
-      const res = await this.getPGPool(cluster).query(
-        `SELECT * FROM "${tableName}"${where} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-        [...params, limit, offset],
-      );
-      const count = await this.getPGPool(cluster).query(
-        `SELECT COUNT(*) as total FROM "${tableName}"${where}`,
-        params,
-      );
-      return {
-        data: res.rows,
-        total: parseInt((count.rows[0] as any).total),
-        page,
-        limit,
-      };
-    } else if (cluster.type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const request = pool.request();
-      const { where } = buildWhere(ClusterType.MSSQL, request);
-      request.input('offset', mssql.Int, offset);
-      request.input('limit', mssql.Int, limit);
-      const result = await request.query(
-        `SELECT * FROM "${tableName}"${where} ORDER BY (SELECT NULL) OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY; SELECT COUNT(*) as total FROM "${tableName}"${where};`,
-      );
-      const recordsets = result.recordsets as any;
-      return {
-        data: recordsets[0],
-        total: recordsets[1][0].total,
-        page,
-        limit,
-      };
+    switch (cluster.type) {
+      case ClusterType.MYSQL:
+        return this.runFindMySQL(
+          cluster,
+          escapedTableName,
+          filters,
+          page,
+          limit,
+          offset,
+        );
+      case ClusterType.POSTGRES:
+        return this.runFindPostgres(
+          cluster,
+          escapedTableName,
+          filters,
+          page,
+          limit,
+          offset,
+        );
+      case ClusterType.MSSQL:
+        return this.runFindMSSQL(
+          cluster,
+          escapedTableName,
+          filters,
+          page,
+          limit,
+          offset,
+        );
+      default:
+        throw new Error(`Unsupported cluster type: ${cluster.type}`);
     }
+  }
+
+  private async runFindMySQL(
+    cluster: Cluster,
+    escapedTableName: string,
+    filters: any[],
+    page: number,
+    limit: number,
+    offset: number,
+  ) {
+    const { where, params } = this.buildWhereClause(
+      ClusterType.MYSQL,
+      filters,
+    );
+    const sql = [
+      'SELECT * FROM',
+      escapedTableName,
+      where,
+      'LIMIT ? OFFSET ?',
+    ].filter(Boolean).join(' ');
+
+    const pool = this.getMySQLPool(cluster);
+    const [rows] = await pool.query(sql, [
+      ...params,
+      Number(limit),
+      Number(offset),
+    ]);
+
+    const countSql = ['SELECT COUNT(*) as total FROM', escapedTableName, where]
+      .filter(Boolean)
+      .join(' ');
+    const [count]: any = await pool.query(countSql, params);
+    return { data: rows, total: count[0].total, page, limit };
+  }
+
+  private async runFindPostgres(
+    cluster: Cluster,
+    escapedTableName: string,
+    filters: any[],
+    page: number,
+    limit: number,
+    offset: number,
+  ) {
+    const { where, params } = this.buildWhereClause(
+      ClusterType.POSTGRES,
+      filters,
+    );
+    const sql = [
+      'SELECT * FROM',
+      escapedTableName,
+      where,
+      `LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    ].filter(Boolean).join(' ');
+
+    const pool = this.getPGPool(cluster);
+    const res = await pool.query(sql, [...params, limit, offset]);
+
+    const countSql = ['SELECT COUNT(*) as total FROM', escapedTableName, where]
+      .filter(Boolean)
+      .join(' ');
+    const count = await pool.query(countSql, params);
+    return {
+      data: res.rows,
+      total: Number.parseInt((count.rows[0] as any).total),
+      page,
+      limit,
+    };
+  }
+
+  private async runFindMSSQL(
+    cluster: Cluster,
+    escapedTableName: string,
+    filters: any[],
+    page: number,
+    limit: number,
+    offset: number,
+  ) {
+    const pool = await this.getMSSQLPool(cluster);
+    const request = pool.request();
+    const { where } = this.buildWhereClause(
+      ClusterType.MSSQL,
+      filters,
+      request,
+    );
+    request.input('offset', mssql.Int, offset);
+    request.input('limit', mssql.Int, limit);
+
+    const sql = [
+      'SELECT * FROM',
+      escapedTableName,
+      where,
+      'ORDER BY (SELECT NULL) OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY;',
+      'SELECT COUNT(*) as total FROM',
+      escapedTableName,
+      where + ';',
+    ].filter(Boolean).join(' ');
+
+    const result = await request.query(sql);
+    const recordsets = result.recordsets as any;
+    return {
+      data: recordsets[0],
+      total: recordsets[1][0].total,
+      page,
+      limit,
+    };
+  }
+
+  private buildWhereClause(
+    type: ClusterType,
+    filters: any[],
+    request?: mssql.Request,
+  ) {
+    if (!filters || filters.length === 0) return { where: '', params: [] };
+    const params: any[] = [];
+    const clauses = filters.map((f, i) => {
+      const { column, operator, value } = f;
+      let op = '';
+      let val = value;
+      const col = this.escapeIdentifier(column, type);
+
+      switch (operator) {
+        case 'is':
+          op = '=';
+          break;
+        case 'is_not':
+          op = '!=';
+          break;
+        case 'contains':
+          op = 'LIKE';
+          val = `%${value}%`;
+          break;
+        case 'not_contains':
+          op = 'NOT LIKE';
+          val = `%${value}%`;
+          break;
+        case 'starts_with':
+          op = 'LIKE';
+          val = `${value}%`;
+          break;
+        case 'ends_with':
+          op = 'LIKE';
+          val = `%${value}`;
+          break;
+        case 'gt':
+          op = '>';
+          break;
+        case 'lt':
+          op = '<';
+          break;
+        case 'is_null':
+          return `${col} IS NULL`;
+        case 'is_not_null':
+          return `${col} IS NOT NULL`;
+        default:
+          op = '=';
+      }
+
+      if (type === ClusterType.MSSQL && request) {
+        request.input(`f${i}`, val);
+        return `${col} ${op} @f${i}`;
+      } else if (type === ClusterType.POSTGRES) {
+        params.push(val);
+        return `${col} ${op} $${params.length}`;
+      } else {
+        params.push(val);
+        return `${col} ${op} ?`;
+      }
+    });
+
+    return { where: ' WHERE ' + clauses.join(' AND '), params };
   }
 
   async updateTableData(
@@ -487,52 +599,85 @@ export class ClustersService extends UserOwnedService<Cluster> {
   ) {
     const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
-    const { type } = cluster;
+    const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
 
-    if (type === ClusterType.MYSQL) {
-      const set = Object.keys(data)
-        .map((k) => `\`${k}\` = ?`)
-        .join(', ');
-      const cond = Object.keys(where)
-        .map((k) => `\`${k}\` = ?`)
-        .join(' AND ');
-      const [result] = await this.getMySQLPool(cluster).query(
-        `UPDATE \`${tableName}\` SET ${set} WHERE ${cond}`,
-        [...Object.values(data), ...Object.values(where)],
-      );
-      return result;
-    } else if (type === ClusterType.POSTGRES) {
-      const set = Object.keys(data)
-        .map((k, i) => `"${k}" = $${i + 1}`)
-        .join(', ');
-      const cond = Object.keys(where)
-        .map((k, i) => `"${k}" = $${Object.keys(data).length + i + 1}`)
-        .join(' AND ');
-      const res = await this.getPGPool(cluster).query(
-        `UPDATE "${tableName}" SET ${set} WHERE ${cond}`,
-        [...Object.values(data), ...Object.values(where)],
-      );
-      return res.rowCount;
-    } else if (type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const req = pool.request();
-      const set = Object.keys(data)
-        .map((k, i) => {
-          req.input(`v${i}`, data[k]);
-          return `"${k}" = @v${i}`;
-        })
-        .join(', ');
-      const cond = Object.keys(where)
-        .map((k, i) => {
-          req.input(`c${i}`, where[k]);
-          return `"${k}" = @c${i}`;
-        })
-        .join(' AND ');
-      const result = await req.query(
-        `UPDATE "${tableName}" SET ${set} WHERE ${cond}`,
-      );
-      return result.rowsAffected[0];
+    switch (cluster.type) {
+      case ClusterType.MYSQL:
+        return this.runUpdateMySQL(cluster, escapedTableName, data, where);
+      case ClusterType.POSTGRES:
+        return this.runUpdatePostgres(cluster, escapedTableName, data, where);
+      case ClusterType.MSSQL:
+        return this.runUpdateMSSQL(cluster, escapedTableName, data, where);
+      default:
+        throw new Error(`Unsupported cluster type: ${cluster.type}`);
     }
+  }
+
+  private async runUpdateMySQL(
+    cluster: Cluster,
+    escapedTableName: string,
+    data: any,
+    where: any,
+  ) {
+    const set = Object.keys(data)
+      .map((k) => `${this.escapeIdentifier(k, ClusterType.MYSQL)} = ?`)
+      .join(', ');
+    const cond = Object.keys(where)
+      .map((k) => `${this.escapeIdentifier(k, ClusterType.MYSQL)} = ?`)
+      .join(' AND ');
+    const [result] = await this.getMySQLPool(cluster).query(
+      `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
+      [...Object.values(data), ...Object.values(where)],
+    );
+    return result;
+  }
+
+  private async runUpdatePostgres(
+    cluster: Cluster,
+    escapedTableName: string,
+    data: any,
+    where: any,
+  ) {
+    const set = Object.keys(data)
+      .map((k, i) => `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${i + 1}`)
+      .join(', ');
+    const cond = Object.keys(where)
+      .map(
+        (k, i) =>
+          `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${Object.keys(data).length + i + 1}`,
+      )
+      .join(' AND ');
+    const res = await this.getPGPool(cluster).query(
+      `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
+      [...Object.values(data), ...Object.values(where)],
+    );
+    return res.rowCount;
+  }
+
+  private async runUpdateMSSQL(
+    cluster: Cluster,
+    escapedTableName: string,
+    data: any,
+    where: any,
+  ) {
+    const pool = await this.getMSSQLPool(cluster);
+    const req = pool.request();
+    const set = Object.keys(data)
+      .map((k, i) => {
+        req.input(`v${i}`, data[k]);
+        return `${this.escapeIdentifier(k, ClusterType.MSSQL)} = @v${i}`;
+      })
+      .join(', ');
+    const cond = Object.keys(where)
+      .map((k, i) => {
+        req.input(`c${i}`, where[k]);
+        return `${this.escapeIdentifier(k, ClusterType.MSSQL)} = @c${i}`;
+      })
+      .join(' AND ');
+    const result = await req.query(
+      `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
+    );
+    return result.rowsAffected[0];
   }
 
   async insertTableData(
@@ -543,43 +688,70 @@ export class ClustersService extends UserOwnedService<Cluster> {
   ) {
     const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
-    const { type } = cluster;
+    const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
 
-    if (type === ClusterType.MYSQL) {
-      const keys = Object.keys(data);
-      const cols = keys.map((k) => `\`${k}\``).join(', ');
-      const placeholders = keys.map(() => '?').join(', ');
-      const [result] = await this.getMySQLPool(cluster).query(
-        `INSERT INTO \`${tableName}\` (${cols}) VALUES (${placeholders})`,
-        Object.values(data),
-      );
-      return result;
-    } else if (type === ClusterType.POSTGRES) {
-      const keys = Object.keys(data);
-      const cols = keys.map((k) => `"${k}"`).join(', ');
-      const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
-      const res = await this.getPGPool(cluster).query(
-        `INSERT INTO "${tableName}" (${cols}) VALUES (${placeholders}) RETURNING *`,
-        Object.values(data),
-      );
-      return (res.rows as any)[0];
-    } else if (type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const req = pool.request();
-      const cols = Object.keys(data)
-        .map((k) => `"${k}"`)
-        .join(', ');
-      const placeholders = Object.keys(data)
-        .map((k, i) => {
-          req.input(`v${i}`, data[k]);
-          return `@v${i}`;
-        })
-        .join(', ');
-      const result = await req.query(
-        `INSERT INTO "${tableName}" (${cols}) VALUES (${placeholders}); SELECT SCOPE_IDENTITY() as id;`,
-      );
-      return result.recordset[0];
+    switch (cluster.type) {
+      case ClusterType.MYSQL:
+        return this.runInsertMySQL(cluster, escapedTableName, data);
+      case ClusterType.POSTGRES:
+        return this.runInsertPostgres(cluster, escapedTableName, data);
+      case ClusterType.MSSQL:
+        return this.runInsertMSSQL(cluster, escapedTableName, data);
+      default:
+        throw new Error(`Unsupported cluster type: ${cluster.type}`);
     }
+  }
+
+  private async runInsertMySQL(
+    cluster: Cluster,
+    escapedTableName: string,
+    data: any,
+  ) {
+    const keys = Object.keys(data);
+    const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.MYSQL)).join(', ');
+    const placeholders = keys.map(() => '?').join(', ');
+    const [result] = await this.getMySQLPool(cluster).query(
+      `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`,
+      Object.values(data),
+    );
+    return result;
+  }
+
+  private async runInsertPostgres(
+    cluster: Cluster,
+    escapedTableName: string,
+    data: any,
+  ) {
+    const keys = Object.keys(data);
+    const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES)).join(', ');
+    const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
+    const res = await this.getPGPool(cluster).query(
+      `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}) RETURNING *`,
+      Object.values(data),
+    );
+    return (res.rows as any)[0];
+  }
+
+  private async runInsertMSSQL(
+    cluster: Cluster,
+    escapedTableName: string,
+    data: any,
+  ) {
+    const pool = await this.getMSSQLPool(cluster);
+    const req = pool.request();
+    const cols = Object.keys(data)
+      .map((k) => this.escapeIdentifier(k, ClusterType.MSSQL))
+      .join(', ');
+    const placeholders = Object.keys(data)
+      .map((k, i) => {
+        req.input(`v${i}`, data[k]);
+        return `@v${i}`;
+      })
+      .join(', ');
+    const result = await req.query(
+      `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}); SELECT SCOPE_IDENTITY() as id;`,
+    );
+    return result.recordset[0];
   }
 
   async deleteTableData(
@@ -590,40 +762,67 @@ export class ClustersService extends UserOwnedService<Cluster> {
   ) {
     const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
-    const { type } = cluster;
+    const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
 
-    if (type === ClusterType.MYSQL) {
-      const cond = Object.keys(where)
-        .map((k) => `\`${k}\` = ?`)
-        .join(' AND ');
-      const [result] = await this.getMySQLPool(cluster).query(
-        `DELETE FROM \`${tableName}\` WHERE ${cond}`,
-        Object.values(where),
-      );
-      return result;
-    } else if (type === ClusterType.POSTGRES) {
-      const cond = Object.keys(where)
-        .map((k, i) => `"${k}" = $${i + 1}`)
-        .join(' AND ');
-      const res = await this.getPGPool(cluster).query(
-        `DELETE FROM "${tableName}" WHERE ${cond}`,
-        Object.values(where),
-      );
-      return res.rowCount;
-    } else if (type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const req = pool.request();
-      const cond = Object.keys(where)
-        .map((k, i) => {
-          req.input(`c${i}`, where[k]);
-          return `"${k}" = @c${i}`;
-        })
-        .join(' AND ');
-      const result = await req.query(
-        `DELETE FROM "${tableName}" WHERE ${cond}`,
-      );
-      return result.rowsAffected[0];
+    switch (cluster.type) {
+      case ClusterType.MYSQL:
+        return this.runDeleteMySQL(cluster, escapedTableName, where);
+      case ClusterType.POSTGRES:
+        return this.runDeletePostgres(cluster, escapedTableName, where);
+      case ClusterType.MSSQL:
+        return this.runDeleteMSSQL(cluster, escapedTableName, where);
+      default:
+        throw new Error(`Unsupported cluster type: ${cluster.type}`);
     }
+  }
+
+  private async runDeleteMySQL(
+    cluster: Cluster,
+    escapedTableName: string,
+    where: any,
+  ) {
+    const cond = Object.keys(where)
+      .map((k) => `${this.escapeIdentifier(k, ClusterType.MYSQL)} = ?`)
+      .join(' AND ');
+    const [result] = await this.getMySQLPool(cluster).query(
+      `DELETE FROM ${escapedTableName} WHERE ${cond}`,
+      Object.values(where),
+    );
+    return result;
+  }
+
+  private async runDeletePostgres(
+    cluster: Cluster,
+    escapedTableName: string,
+    where: any,
+  ) {
+    const cond = Object.keys(where)
+      .map((k, i) => `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${i + 1}`)
+      .join(' AND ');
+    const res = await this.getPGPool(cluster).query(
+      `DELETE FROM ${escapedTableName} WHERE ${cond}`,
+      Object.values(where),
+    );
+    return res.rowCount;
+  }
+
+  private async runDeleteMSSQL(
+    cluster: Cluster,
+    escapedTableName: string,
+    where: any,
+  ) {
+    const pool = await this.getMSSQLPool(cluster);
+    const req = pool.request();
+    const cond = Object.keys(where)
+      .map((k, i) => {
+        req.input(`c${i}`, where[k]);
+        return `${this.escapeIdentifier(k, ClusterType.MSSQL)} = @c${i}`;
+      })
+      .join(' AND ');
+    const result = await req.query(
+      `DELETE FROM ${escapedTableName} WHERE ${cond}`,
+    );
+    return result.rowsAffected[0];
   }
 
   async executeQuery(
@@ -635,85 +834,28 @@ export class ClustersService extends UserOwnedService<Cluster> {
   ) {
     const cluster = await this.findClusterForConnection(id, userId);
     const startTime = Date.now();
-    let success = true,
-      errorMessage = null,
-      results = null,
-      totals: number[] = [];
 
-    const isSelect = query.trim().toUpperCase().startsWith('SELECT');
-    const isSingleQuery = !query.includes(';') || query.trim().endsWith(';');
-    const usePagination = page && limit && isSelect && isSingleQuery;
+    const { execQuery, usePagination, baseQuery } = this.prepareQueryParams(
+      query,
+      cluster,
+      page,
+      limit,
+    );
 
-    let execQuery = query;
-    if (usePagination) {
-      const offset = (page - 1) * limit;
-      if (cluster.type === ClusterType.MSSQL) {
-        execQuery = `SELECT * FROM (${query.replace(/;$/, '')}) AS __synq_sub ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
-      } else {
-        execQuery = `SELECT * FROM (${query.replace(/;$/, '')}) AS __synq_sub LIMIT ${limit} OFFSET ${offset}`;
-      }
-    }
+    let success = true;
+    let errorMessage = null;
+    let results: any = null;
+    let totals: number[] = [];
 
     try {
-      if (cluster.type === ClusterType.MYSQL) {
-        const pool = this.getMySQLPool(cluster);
-        const [rows] = await pool.query(execQuery);
-        if (Array.isArray(rows) && rows.length > 0 && Array.isArray(rows[0])) {
-          results = rows;
-        } else {
-          results = [rows];
-        }
-
-        if (usePagination) {
-          const [countRes]: any = await pool.query(
-            `SELECT COUNT(*) as total FROM (${query.replace(/;$/, '')}) AS __synq_count`,
-          );
-          totals = [countRes[0].total];
-        } else {
-          totals = (results || []).map((r: any) =>
-            Array.isArray(r) ? r.length : 0,
-          );
-        }
-      } else if (cluster.type === ClusterType.POSTGRES) {
-        const pool = this.getPGPool(cluster);
-        const res = await pool.query(execQuery);
-        if (Array.isArray(res)) {
-          results = res.map((r) => r.rows || []);
-        } else {
-          results = [res.rows || []];
-        }
-
-        if (usePagination) {
-          const countRes = await pool.query(
-            `SELECT COUNT(*) as total FROM (${query.replace(/;$/, '')}) AS __synq_count`,
-          );
-          totals = [parseInt(countRes.rows[0].total)];
-        } else {
-          totals = (results || []).map((r: any) =>
-            Array.isArray(r) ? r.length : 0,
-          );
-        }
-      } else if (cluster.type === ClusterType.MSSQL) {
-        const pool = await this.getMSSQLPool(cluster);
-        const result = await pool.request().query(execQuery);
-        results =
-          Array.isArray(result.recordsets) && result.recordsets.length > 0
-            ? result.recordsets
-            : [result.recordset];
-
-        if (usePagination) {
-          const countRes = await pool
-            .request()
-            .query(
-              `SELECT COUNT(*) as total FROM (${query.replace(/;$/, '')}) AS __synq_count`,
-            );
-          totals = [countRes.recordset[0].total];
-        } else {
-          totals = (results || []).map((r: any) =>
-            Array.isArray(r) ? r.length : 0,
-          );
-        }
-      }
+      const resp = await this.runDatabaseQuery(
+        cluster,
+        execQuery,
+        usePagination,
+        baseQuery,
+      );
+      results = resp.results;
+      totals = resp.totals;
     } catch (error) {
       success = false;
       errorMessage = error.message;
@@ -728,8 +870,132 @@ export class ClustersService extends UserOwnedService<Cluster> {
         errorMessage,
       });
     }
+
     return { results, totals, executionTimeMs: Date.now() - startTime };
   }
+
+  private prepareQueryParams(
+    query: string,
+    cluster: Cluster,
+    page?: number,
+    limit?: number,
+  ) {
+    const trimmedQuery = query.trim();
+    // Use a non-backtracking method for removing trailing semicolons (prevents ReDoS)
+    let end = trimmedQuery.length;
+    while (end > 0 && trimmedQuery[end - 1] === ';') {
+      end--;
+    }
+    const baseQuery = trimmedQuery.substring(0, end);
+    const isSelect = baseQuery.toUpperCase().startsWith('SELECT');
+    const isSingleQuery = !baseQuery.includes(';');
+    const usePagination = !!(page && limit && isSelect && isSingleQuery);
+
+    let execQuery = query;
+    if (usePagination) {
+      const offset = (page! - 1) * limit!;
+      if (cluster.type === ClusterType.MSSQL) {
+        execQuery = `SELECT * FROM (${baseQuery}) AS __synq_sub ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
+      } else {
+        execQuery = `SELECT * FROM (${baseQuery}) AS __synq_sub LIMIT ${limit} OFFSET ${offset}`;
+      }
+    }
+
+    return { execQuery, usePagination, baseQuery };
+  }
+
+  private async runDatabaseQuery(
+    cluster: Cluster,
+    execQuery: string,
+    usePagination: boolean,
+    baseQuery: string,
+  ): Promise<{ results: any; totals: number[] }> {
+    switch (cluster.type) {
+      case ClusterType.MYSQL:
+        return this.runMySQL(cluster, execQuery, usePagination, baseQuery);
+      case ClusterType.POSTGRES:
+        return this.runPostgres(cluster, execQuery, usePagination, baseQuery);
+      case ClusterType.MSSQL:
+        return this.runMSSQL(cluster, execQuery, usePagination, baseQuery);
+      default:
+        throw new Error(`Unsupported cluster type: ${cluster.type}`);
+    }
+  }
+
+  private async runMySQL(
+    cluster: Cluster,
+    execQuery: string,
+    usePagination: boolean,
+    baseQuery: string,
+  ) {
+    const pool = this.getMySQLPool(cluster);
+    const [rows] = await pool.query(execQuery);
+    const results =
+      Array.isArray(rows) && rows.length > 0 && Array.isArray(rows[0])
+        ? rows
+        : [rows];
+
+    let totals = [];
+    if (usePagination) {
+      const [countRes]: any = await pool.query(
+        `SELECT COUNT(*) as total FROM (${baseQuery}) AS __synq_count`,
+      );
+      totals = [countRes[0].total];
+    } else {
+      totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
+    }
+    return { results, totals };
+  }
+
+  private async runPostgres(
+    cluster: Cluster,
+    execQuery: string,
+    usePagination: boolean,
+    baseQuery: string,
+  ) {
+    const pool = this.getPGPool(cluster);
+    const res = await pool.query(execQuery);
+    const results = Array.isArray(res)
+      ? res.map((r) => r.rows || [])
+      : [res.rows || []];
+
+    let totals = [];
+    if (usePagination) {
+      const countRes = await pool.query(
+        `SELECT COUNT(*) as total FROM (${baseQuery}) AS __synq_count`,
+      );
+      totals = [Number.parseInt(countRes.rows[0].total)];
+    } else {
+      totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
+    }
+    return { results, totals };
+  }
+
+  private async runMSSQL(
+    cluster: Cluster,
+    execQuery: string,
+    usePagination: boolean,
+    baseQuery: string,
+  ) {
+    const pool = await this.getMSSQLPool(cluster);
+    const result = await pool.request().query(execQuery);
+    const results =
+      Array.isArray(result.recordsets) && result.recordsets.length > 0
+        ? result.recordsets
+        : [result.recordset];
+
+    let totals = [];
+    if (usePagination) {
+      const countRes = await pool
+        .request()
+        .query(`SELECT COUNT(*) as total FROM (${baseQuery}) AS __synq_count`);
+      totals = [countRes.recordset[0].total];
+    } else {
+      totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
+    }
+    return { results, totals };
+  }
+
 
   async getQueryLogs(clusterId: string, userId: string) {
     return this.queryLogRepo.find({
@@ -750,9 +1016,11 @@ export class ClustersService extends UserOwnedService<Cluster> {
 
     let sql = '';
     if (cluster.type === ClusterType.MYSQL) {
-      sql = `DROP TABLE IF EXISTS \`${tableName}\`;`;
+      sql = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.MYSQL)};`;
     } else if (cluster.type === ClusterType.POSTGRES) {
-      sql = `DROP TABLE IF EXISTS "${tableName}" CASCADE;`;
+      sql = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} CASCADE;`;
+    } else if (cluster.type === ClusterType.MSSQL) {
+      sql = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.MSSQL)};`;
     }
 
     try {
@@ -889,10 +1157,10 @@ export class ClustersService extends UserOwnedService<Cluster> {
       let ddl = '';
       let dropDdl = '';
       if (targetCluster.type === ClusterType.MYSQL) {
-        dropDdl = `DROP TABLE IF EXISTS \`${tableName}\`;`;
+        dropDdl = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.MYSQL)};`;
         ddl = this.generateMySQLCreateTable(tableName, columns);
       } else if (targetCluster.type === ClusterType.POSTGRES) {
-        dropDdl = `DROP TABLE IF EXISTS "${tableName}" CASCADE;`;
+        dropDdl = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} CASCADE;`;
         ddl = this.generatePostgresCreateTable(tableName, columns);
       }
 
@@ -932,70 +1200,88 @@ export class ClustersService extends UserOwnedService<Cluster> {
 
   private generateMySQLCreateTable(tableName: string, columns: any[]) {
     const colStrings = columns.map((c) => {
-      let s = `\`${c.name}\` ${c.fullType || c.type}`;
-      if (c.nullable === 'NO') s += ' NOT NULL';
+      const colParts = [
+        this.escapeIdentifier(c.name, ClusterType.MYSQL),
+        this.sanitizeType(c.fullType || c.type),
+      ];
+
+      if (c.nullable === 'NO') colParts.push('NOT NULL');
 
       if (c.defaultValue !== null && c.defaultValue !== undefined) {
         const def = String(c.defaultValue).trim();
         const upperDef = def.toUpperCase();
 
         if (upperDef === 'NULL') {
-          s += ' DEFAULT NULL';
+          colParts.push('DEFAULT NULL');
         } else if (
           upperDef === 'CURRENT_TIMESTAMP' ||
           upperDef.includes('(') ||
           upperDef.includes(')')
         ) {
-          s += ` DEFAULT ${def}`;
+          colParts.push(`DEFAULT ${def}`);
         } else if (
           (def.startsWith("'") && def.endsWith("'")) ||
           !isNaN(Number(def))
         ) {
-          s += ` DEFAULT ${def}`;
+          colParts.push(`DEFAULT ${def}`);
         } else {
-          s += ` DEFAULT '${def.replace(/'/g, "''")}'`;
+          colParts.push(`DEFAULT '${def.replaceAll(/'/g, "''")}'`);
         }
       }
 
-      if (c.columnKey === 'PRI' || c.isPrimary) s += ' PRIMARY KEY';
-      return s;
+      if (c.columnKey === 'PRI' || c.isPrimary) colParts.push('PRIMARY KEY');
+      return colParts.join(' ');
     });
 
-    return `CREATE TABLE \`${tableName}\` (\n  ${colStrings.join(',\n  ')}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`;
+    return [
+      'CREATE TABLE',
+      this.escapeIdentifier(tableName, ClusterType.MYSQL),
+      '(',
+      colStrings.join(',\n  '),
+      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;',
+    ].join(' ');
   }
 
   private generatePostgresCreateTable(tableName: string, columns: any[]) {
     const colStrings = columns.map((c) => {
-      let type = c.udtName || c.type;
-      if (type === 'varchar') type = 'text';
+      const type = this.sanitizeType((c.udtName || c.type) === 'varchar' ? 'text' : (c.udtName || c.type));
+      const colParts = [
+        this.escapeIdentifier(c.name, ClusterType.POSTGRES),
+        type,
+      ];
 
-      let s = `"${c.name}" ${type}`;
-      if (c.nullable === 'NO') s += ' NOT NULL';
+      if (c.nullable === 'NO') colParts.push('NOT NULL');
 
       if (c.defaultValue !== null && c.defaultValue !== undefined) {
         const def = String(c.defaultValue).trim();
         const upperDef = def.toUpperCase();
 
         if (upperDef === 'NULL') {
-          s += ' DEFAULT NULL';
+          colParts.push('DEFAULT NULL');
         } else if (
           !upperDef.includes('NEXTVAL') &&
           !upperDef.includes('(') &&
           !upperDef.includes(')')
         ) {
           if (!def.startsWith("'") && isNaN(Number(def))) {
-            s += ` DEFAULT '${def.replace(/'/g, "''")}'`;
+            colParts.push(`DEFAULT '${def.replaceAll(/'/g, "''")}'`);
           } else {
-            s += ` DEFAULT ${def}`;
+            colParts.push(`DEFAULT ${def}`);
           }
         } else if (!upperDef.includes('NEXTVAL')) {
-          s += ` DEFAULT ${def}`;
+          colParts.push(`DEFAULT ${def}`);
         }
       }
-      return s;
+      return colParts.join(' ');
     });
 
-    return `CREATE TABLE "${tableName}" (\n  ${colStrings.join(',\n  ')}\n);`;
+    return [
+      'CREATE TABLE',
+      this.escapeIdentifier(tableName, ClusterType.POSTGRES),
+      '(',
+      colStrings.join(',\n  '),
+      ');',
+    ].join(' ');
   }
 
   async backup(id: string, userId: string, format: 'sql' | 'csv' | 'json') {
@@ -1025,19 +1311,17 @@ export class ClustersService extends UserOwnedService<Cluster> {
           for (const row of data.data) {
             const keys = Object.keys(row);
             const cols = keys
-              .map((k) =>
-                cluster.type === ClusterType.MYSQL ? `\`${k}\`` : `"${k}"`,
-              )
+              .map((k) => this.escapeIdentifier(k, cluster.type))
               .join(', ');
             const values = Object.values(row)
               .map((v) => {
                 if (v === null) return 'NULL';
-                if (typeof v === 'string') return `'${v.replace(/'/g, "''")}'`;
+                if (typeof v === 'string') return `'${v.replaceAll(/'/g, "''")}'`;
                 if (v instanceof Date) return `'${v.toISOString()}'`;
                 return v;
               })
               .join(', ');
-            sqlOutput += `INSERT INTO ${cluster.type === ClusterType.MYSQL ? `\`${tableName}\`` : `"${tableName}"`} (${cols}) VALUES (${values});\n`;
+            sqlOutput += `INSERT INTO ${this.escapeIdentifier(tableName, cluster.type)} (${cols}) VALUES (${values});\n`;
           }
           sqlOutput += '\n';
         }
@@ -1053,7 +1337,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
                 if (val === null) return '';
                 const str = String(val);
                 return str.includes(',') || str.includes('"')
-                  ? `"${str.replace(/"/g, '""')}"`
+                  ? `"${str.replaceAll(/"/g, '""')}"`
                   : str;
               })
               .join(','),

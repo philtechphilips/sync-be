@@ -2,8 +2,7 @@ import {
   IsString,
   IsEnum,
   IsNumber,
-  IsOptional,
-  IsHexColor,
+  IsOptional
 } from 'class-validator';
 import { ClusterType, ClusterEnvironment } from '../entities/cluster.entity';
 

@@ -5,13 +5,11 @@ import {
   Body,
   Param,
   Delete,
-  UseGuards,
   Request,
   UsePipes,
   ValidationPipe,
   Query,
   Patch,
-  Header,
 } from '@nestjs/common';
 import { Cluster } from './entities/cluster.entity';
 import { ClustersService } from './clusters.service';

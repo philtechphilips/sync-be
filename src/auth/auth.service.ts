@@ -185,33 +185,20 @@ export class AuthService {
   }
 
   async update(id: string, updateAuthDto: UpdateAuthDto) {
-    let findUser;
     try {
-      findUser = await this.authRepo.findOne({ id });
-      if (!findUser) {
-        throw new BadRequestException('User not found!');
-      }
+      const findUser = await this.findUserOrThrow(id);
 
       Object.assign(findUser, updateAuthDto);
 
       await this.authRepo.save(findUser);
-
-      const {
-        password,
-        access_token,
-        refresh_token,
-        refresh_token_expiry,
-        ...user
-      } = findUser;
-      return user;
+      return this.getSafeUser(findUser);
     } catch (error) {
       throw error;
     }
   }
 
   async updateProfile(id: string, dto: UpdateProfileDto) {
-    const user = await this.authRepo.findOne({ id });
-    if (!user) throw new BadRequestException('User not found!');
+    const user = await this.findUserOrThrow(id);
 
     if (dto.full_name !== undefined) user.full_name = dto.full_name;
     if (dto.profile_picture !== undefined)
@@ -221,22 +208,11 @@ export class AuthService {
     }
 
     await this.authRepo.save(user);
-    const updated = await this.authRepo.findOne({ id });
-    console.log('User after save:', updated);
-
-    const {
-      password,
-      access_token,
-      refresh_token,
-      refresh_token_expiry,
-      ...safe
-    } = user;
-    return safe;
+    return this.getSafeUser(user);
   }
 
   async changePassword(id: string, dto: ChangePasswordDto) {
-    const user = await this.authRepo.findOne({ id });
-    if (!user) throw new BadRequestException('User not found!');
+    const user = await this.findUserOrThrow(id);
 
     const valid = await validatePassword(dto.current_password, user.password);
     if (!valid) throw new BadRequestException('Current password is incorrect.');
@@ -278,13 +254,13 @@ export class AuthService {
       });
 
       if (!tokenResponse.ok) {
-        const errorData = await tokenResponse.json();
+        const errorData: any = await tokenResponse.json();
         throw new UnauthorizedException(
           errorData.error_description || 'Failed to exchange code for tokens',
         );
       }
 
-      const tokenData = await tokenResponse.json();
+      const tokenData: any = await tokenResponse.json();
       const { access_token } = tokenData;
 
       // Get user info from Google
@@ -309,7 +285,7 @@ export class AuthService {
         name?: string;
         picture?: string;
         verified_email?: boolean;
-      } = await userInfoResponse.json();
+      } = (await userInfoResponse.json()) as any;
 
       // Validate email
       if (!googleUserInfo.email) {
@@ -540,6 +516,23 @@ export class AuthService {
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
+  }
+
+  private async findUserOrThrow(id: string) {
+    const user = await this.authRepo.findOne({ id });
+    if (!user) throw new BadRequestException('User not found!');
+    return user;
+  }
+
+  private getSafeUser(user: any) {
+    const {
+      password,
+      access_token,
+      refresh_token,
+      refresh_token_expiry,
+      ...safeUser
+    } = user;
+    return safeUser;
   }
 
   private calculateTokenExpiry(expiration: string): Date {

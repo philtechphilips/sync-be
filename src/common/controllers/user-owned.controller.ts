@@ -1,14 +1,9 @@
 import {
   Get,
-  Post,
-  Body,
   Param,
   Delete,
-  Patch,
   Request,
   UseGuards,
-  UsePipes,
-  ValidationPipe,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../../auth/guards/jwt.guard';
 import { UserOwnedService } from '../services/user-owned.service';

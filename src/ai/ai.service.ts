@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import OpenAI from 'openai';
 import { ClustersService } from '../clusters/clusters.service';
 import { ClusterType } from '../clusters/entities/cluster.entity';
@@ -34,7 +34,7 @@ export class AIService {
 
     return response.choices[0].message.content
       ?.trim()
-      .replace(/```sql|```/g, '');
+      .replaceAll(/```sql|```/g, '');
   }
 
   async *generateSQLStream(clusterId: string, userId: string, prompt: string) {
@@ -60,7 +60,7 @@ export class AIService {
     for await (const chunk of stream) {
       const content = chunk.choices[0]?.delta?.content || '';
       if (content) {
-        yield content.replace(/```sql|```/g, '');
+        yield content.replaceAll(/```sql|```/g, '');
       }
     }
   }

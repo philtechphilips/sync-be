@@ -8,7 +8,6 @@ import {
   UpdateSavedQueryDto,
 } from './dto/saved-query.dto';
 import { CreateCollectionDto, UpdateCollectionDto } from './dto/collection.dto';
-import { UserOwnedService } from '../common/services/user-owned.service';
 
 @Injectable()
 export class QueryManagementService {

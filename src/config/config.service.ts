@@ -35,7 +35,7 @@ const schema = joi
 
 const { error, value: envVars } = schema.validate(process.env);
 if (error) {
-  throw Error(`ENV validation error: ${error.message}`);
+  throw new Error(`ENV validation error: ${error.message}`);
 }
 
 export const config = {

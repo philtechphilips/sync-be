@@ -5,15 +5,11 @@ import {
   Param,
   Request,
   UseGuards,
-  Sse,
-  MessageEvent,
   Res,
 } from '@nestjs/common';
 import { Response } from 'express';
 import { AIService } from './ai.service';
 import { JwtAuthGuard } from '../auth/guards/jwt.guard';
-import { Observable, from } from 'rxjs';
-import { map } from 'rxjs/operators';
 
 @Controller('/v1/ai')
 @UseGuards(JwtAuthGuard)
