@@ -123,7 +123,6 @@ export class ClustersService extends UserOwnedService<Cluster> {
     }
   }
 
-
   async testConnection(createClusterDto: CreateClusterDto) {
     const { type, host, port, username, password, database } = createClusterDto;
 

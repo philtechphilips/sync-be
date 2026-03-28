@@ -132,7 +132,6 @@ export class ClustersController extends UserOwnedController<Cluster> {
     );
   }
 
-
   @Post(':id/query')
   async executeQuery(
     @Request() req: any,

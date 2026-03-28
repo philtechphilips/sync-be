@@ -8,7 +8,10 @@ export abstract class UserOwnedService<T extends UserOwnedEntity> {
     protected readonly resourceName: string,
   ) {}
 
-  async findAll(userId: string, options: FindManyOptions<T> = {}): Promise<T[]> {
+  async findAll(
+    userId: string,
+    options: FindManyOptions<T> = {},
+  ): Promise<T[]> {
     return this.repository.find({
       ...options,
       where: { userId, ...(options.where as any) },
@@ -16,7 +19,11 @@ export abstract class UserOwnedService<T extends UserOwnedEntity> {
     });
   }
 
-  async findOne(id: string, userId: string, relations: string[] = []): Promise<T> {
+  async findOne(
+    id: string,
+    userId: string,
+    relations: string[] = [],
+  ): Promise<T> {
     const resource = await this.repository.findOne({
       where: { id, userId } as FindOptionsWhere<T>,
       relations,

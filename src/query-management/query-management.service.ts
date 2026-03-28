@@ -3,7 +3,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SavedQuery } from './entities/saved-query.entity';
 import { Collection } from './entities/collection.entity';
-import { CreateSavedQueryDto, UpdateSavedQueryDto } from './dto/saved-query.dto';
+import {
+  CreateSavedQueryDto,
+  UpdateSavedQueryDto,
+} from './dto/saved-query.dto';
 import { CreateCollectionDto, UpdateCollectionDto } from './dto/collection.dto';
 import { UserOwnedService } from '../common/services/user-owned.service';
 
