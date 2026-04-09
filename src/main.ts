@@ -23,40 +23,40 @@ async function bootstrap() {
   });
 
   // General rate limit — 300 requests per 15 minutes per IP
-  // app.use(
-  //   rateLimit({
-  //     windowMs: 15 * 60 * 1000,
-  //     max: 300,
-  //     standardHeaders: true,
-  //     legacyHeaders: false,
-  //     message: 'Too many requests from this IP, please try again later.',
-  //   }),
-  // );
+  app.use(
+    rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 300,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: 'Too many requests from this IP, please try again later.',
+    }),
+  );
 
   // Stricter limit for AI SQL generation — 30 requests per 15 minutes per IP
-  // app.use(
-  //   '/v1/ai',
-  //   rateLimit({
-  //     windowMs: 15 * 60 * 1000,
-  //     max: 30,
-  //     standardHeaders: true,
-  //     legacyHeaders: false,
-  //     message:
-  //       'AI query limit reached. Please wait before sending more requests.',
-  //   }),
-  // );
+  app.use(
+    '/v1/ai',
+    rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 30,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message:
+        'AI query limit reached. Please wait before sending more requests.',
+    }),
+  );
 
   // Stricter limit for auth endpoints — 20 attempts per 15 minutes per IP
-  // app.use(
-  //   '/v1/auth',
-  //   rateLimit({
-  //     windowMs: 15 * 60 * 1000,
-  //     max: 20,
-  //     standardHeaders: true,
-  //     legacyHeaders: false,
-  //     message: 'Too many authentication attempts. Please try again later.',
-  //   }),
-  // );
+  app.use(
+    '/v1/auth',
+    rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 20,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: 'Too many authentication attempts. Please try again later.',
+    }),
+  );
 
   app.useGlobalInterceptors(new ClassSerializerInterceptor(app.get(Reflector)));
 
