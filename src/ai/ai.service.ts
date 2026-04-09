@@ -13,6 +13,28 @@ export class AIService {
     });
   }
 
+  private getSQLSystemPrompt(clusterType: string): string {
+    if (clusterType === ClusterType.MSSQL) {
+      return `You are a professional T-SQL (Microsoft SQL Server) expert. Generate valid T-SQL code based on the provided schema. Only return raw SQL — no explanations, no markdown, no code fences.
+STRICT T-SQL RULES — never violate these:
+- Use GETDATE() instead of NOW()
+- Use MONTH(GETDATE()), YEAR(GETDATE()), DAY(GETDATE()) instead of EXTRACT(... FROM ...)
+- Use TOP N instead of LIMIT N
+- Use DATEADD / DATEDIFF for date arithmetic
+- Use ISNULL() instead of COALESCE where single-arg fallback is needed
+- Never use PostgreSQL or MySQL-only functions`;
+    }
+    if (clusterType === ClusterType.POSTGRES) {
+      return `You are a professional PostgreSQL expert. Generate valid PostgreSQL code based on the provided schema. Only return raw SQL — no explanations, no markdown, no code fences.
+STRICT PostgreSQL RULES — never violate these:
+- Use NOW() or CURRENT_TIMESTAMP for current time
+- Use EXTRACT(PART FROM timestamp) for date parts
+- Use LIMIT N instead of TOP N
+- Never use T-SQL or MySQL-only functions`;
+    }
+    return `You are a professional SQL expert for ${clusterType}. Generate valid SQL code based on the provided schema. Only return raw SQL — no explanations, no markdown, no code fences.`;
+  }
+
   async generateSQL(clusterId: string, userId: string, prompt: string) {
     const cluster = await this.clustersService.findOne(clusterId, userId);
     const rawSchema = await this.clustersService.getSchema(clusterId, userId);
@@ -23,7 +45,7 @@ export class AIService {
       messages: [
         {
           role: 'system',
-          content: `You are a professional SQL expert. Generate valid SQL code for ${cluster.type} database based on the provided schema. Only return raw SQL. No explanations, no markdown blocks. Just the SQL. Use ${cluster.type === ClusterType.MSSQL ? 'T-SQL' : cluster.type} syntax.`,
+          content: this.getSQLSystemPrompt(cluster.type),
         },
         {
           role: 'user',
@@ -47,7 +69,7 @@ export class AIService {
       messages: [
         {
           role: 'system',
-          content: `You are a professional SQL expert. Generate valid SQL code for ${cluster.type} database based on the provided schema. Only return raw SQL. No explanations, no markdown blocks. Just the SQL. Use ${cluster.type === ClusterType.MSSQL ? 'T-SQL' : cluster.type} syntax.`,
+          content: this.getSQLSystemPrompt(cluster.type),
         },
         {
           role: 'user',
@@ -93,7 +115,7 @@ export class AIService {
       messages: [
         {
           role: 'system',
-          content: `You are a database performance tuner for ${cluster.type}. Suggest code optimizations and indexing strategies specific to ${cluster.type === ClusterType.MSSQL ? 'SQL Server' : cluster.type}. Be concise and technical.`,
+          content: `You are a database performance tuner for ${cluster.type === ClusterType.MSSQL ? 'SQL Server (T-SQL)' : cluster.type}. Suggest query optimizations and indexing strategies. Use only syntax valid for ${cluster.type === ClusterType.MSSQL ? 'T-SQL (GETDATE, DATEADD, TOP, etc.)' : cluster.type}. Be concise and technical.`,
         },
         {
           role: 'user',

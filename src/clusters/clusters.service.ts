@@ -1000,11 +1000,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
     let totals = [];
     if (usePagination) {
       const safeBaseQuery = baseQuery.trim().replace(/;$/, '');
-      const countRes = await pool
-        .request()
-        .query(
-          `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`, // NOSONAR: safeBaseQuery is stripped and intentional for results counting
-        );
+      const countRes = await pool.request().query(
+        `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`, // NOSONAR: safeBaseQuery is stripped and intentional for results counting
+      );
       totals = [countRes.recordset[0].total];
     } else {
       totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
