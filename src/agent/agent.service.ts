@@ -60,7 +60,9 @@ export class AgentService {
       });
       sock.disconnect(true);
       this.agentSockets.delete(userId);
-      this.logger.log(`Agent force-disconnected on key rotation: userId=${userId}`);
+      this.logger.log(
+        `Agent force-disconnected on key rotation: userId=${userId}`,
+      );
     }
   }
 

@@ -77,7 +77,11 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('result')
   handleResult(
     @MessageBody()
-    data: { requestId: string; rows: any[]; rowCount: number },
+    data: {
+      requestId: string;
+      rows: any[];
+      rowCount: number;
+    },
   ) {
     this.agentService.handleResult(data.requestId, data.rows, data.rowCount);
   }

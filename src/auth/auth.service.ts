@@ -78,7 +78,10 @@ export class AuthService {
     }
     const password = await hashPassword(registerDto.password);
     registerDto.password = password;
-    return await this.authRepo.create({ ...registerDto, agentKey: randomUUID() });
+    return await this.authRepo.create({
+      ...registerDto,
+      agentKey: randomUUID(),
+    });
   }
 
   async getAgentKey(userId: string): Promise<{ agentKey: string }> {
