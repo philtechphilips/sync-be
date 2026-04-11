@@ -54,10 +54,14 @@ export class AgentService {
   deregisterByKey(agentKey: string): void {
     const sock = this.agentSockets.get(agentKey);
     if (sock) {
-      sock.emit('auth_error', { message: 'Agent key has been rotated. Please restart with the new key.' });
+      sock.emit('auth_error', {
+        message: 'Agent key has been rotated. Please restart with the new key.',
+      });
       sock.disconnect(true);
       this.agentSockets.delete(agentKey);
-      this.logger.log(`Agent force-disconnected on key rotation: key=${agentKey}`);
+      this.logger.log(
+        `Agent force-disconnected on key rotation: key=${agentKey}`,
+      );
     }
   }
 
@@ -104,9 +108,7 @@ export class AgentService {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(requestId);
-        reject(
-          new GatewayTimeoutException('Agent did not respond within 30s'),
-        );
+        reject(new GatewayTimeoutException('Agent did not respond within 30s'));
       }, this.TIMEOUT_MS);
 
       this.pendingRequests.set(requestId, { resolve, reject, timer });

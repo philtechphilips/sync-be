@@ -254,16 +254,21 @@ export class ClustersService extends UserOwnedService<Cluster> {
       let sql: string;
       let params: any[] = [];
       if (type === ClusterType.MYSQL) {
-        sql = 'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ? ORDER BY table_name ASC';
+        sql =
+          'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ? ORDER BY table_name ASC';
         params = [database, 'BASE TABLE'];
       } else if (type === ClusterType.POSTGRES) {
-        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name ASC";
+        sql =
+          "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name ASC";
       } else {
         sql = `SELECT TABLE_NAME as name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_CATALOG = @database ORDER BY TABLE_NAME ASC`;
-        return (await this.executeViaAgent(cluster, sql, [], { database })).rows;
+        return (await this.executeViaAgent(cluster, sql, [], { database }))
+          .rows;
       }
       const { rows } = await this.executeViaAgent(cluster, sql, params);
-      return rows.map((row: any) => ({ name: row.TABLE_NAME || row.table_name }));
+      return rows.map((row: any) => ({
+        name: row.TABLE_NAME || row.table_name,
+      }));
     }
 
     if (type === ClusterType.MYSQL) {
@@ -302,20 +307,28 @@ export class ClustersService extends UserOwnedService<Cluster> {
       let params: any[] = [];
       let namedParams: Record<string, any> = {};
       if (type === ClusterType.MYSQL) {
-        sql = 'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_name = ?';
+        sql =
+          'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_name = ?';
         params = [database, tableName];
       } else if (type === ClusterType.POSTGRES) {
-        sql = "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)";
+        sql =
+          "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)";
         params = [tableName];
       } else {
-        sql = 'SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @tableName AND TABLE_CATALOG = @database';
+        sql =
+          'SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @tableName AND TABLE_CATALOG = @database';
         namedParams = { tableName, database };
       }
-      const { rows } = await this.executeViaAgent(cluster, sql, params, namedParams);
-      const exists = type === ClusterType.POSTGRES
-        ? rows[0]?.exists
-        : rows.length > 0;
-      if (!exists) throw new BadRequestException(`Table '${tableName}' not found!`);
+      const { rows } = await this.executeViaAgent(
+        cluster,
+        sql,
+        params,
+        namedParams,
+      );
+      const exists =
+        type === ClusterType.POSTGRES ? rows[0]?.exists : rows.length > 0;
+      if (!exists)
+        throw new BadRequestException(`Table '${tableName}' not found!`);
       return;
     }
 
@@ -380,7 +393,8 @@ export class ClustersService extends UserOwnedService<Cluster> {
                WHERE cols.TABLE_NAME = @tableName AND cols.TABLE_CATALOG = @database ORDER BY cols.ORDINAL_POSITION`;
         namedParams = { tableName, database };
       }
-      return (await this.executeViaAgent(cluster, sql, params, namedParams)).rows;
+      return (await this.executeViaAgent(cluster, sql, params, namedParams))
+        .rows;
     }
 
     if (type === ClusterType.MYSQL) {
@@ -447,7 +461,8 @@ export class ClustersService extends UserOwnedService<Cluster> {
                WHERE cols.TABLE_CATALOG = @database ORDER BY cols.TABLE_NAME, cols.ORDINAL_POSITION`;
         namedParams = { database };
       }
-      return (await this.executeViaAgent(cluster, sql, params, namedParams)).rows;
+      return (await this.executeViaAgent(cluster, sql, params, namedParams))
+        .rows;
     }
 
     if (type === ClusterType.MYSQL) {
@@ -511,26 +526,69 @@ export class ClustersService extends UserOwnedService<Cluster> {
     const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
 
     if (cluster.isLocal) {
-      const { where, params, namedParams } = this.buildWhereClauseForAgent(cluster.type, filters);
+      const { where, params, namedParams } = this.buildWhereClauseForAgent(
+        cluster.type,
+        filters,
+      );
       let sql: string;
       if (cluster.type === ClusterType.MSSQL) {
         sql = `SELECT * FROM ${escapedTableName}${where} ORDER BY (SELECT NULL) OFFSET @__offset ROWS FETCH NEXT @__limit ROWS ONLY`;
-        const dataResult = await this.executeViaAgent(cluster, sql, [], { ...namedParams, __offset: offset, __limit: limit });
+        const dataResult = await this.executeViaAgent(cluster, sql, [], {
+          ...namedParams,
+          __offset: offset,
+          __limit: limit,
+        });
         const countSql = `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`;
-        const countResult = await this.executeViaAgent(cluster, countSql, [], namedParams);
-        return { data: dataResult.rows, total: countResult.rows[0]?.total ?? 0, page, limit };
+        const countResult = await this.executeViaAgent(
+          cluster,
+          countSql,
+          [],
+          namedParams,
+        );
+        return {
+          data: dataResult.rows,
+          total: countResult.rows[0]?.total ?? 0,
+          page,
+          limit,
+        };
       } else if (cluster.type === ClusterType.POSTGRES) {
         sql = `SELECT * FROM ${escapedTableName}${where} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-        const dataResult = await this.executeViaAgent(cluster, sql, [...params, limit, offset]);
+        const dataResult = await this.executeViaAgent(cluster, sql, [
+          ...params,
+          limit,
+          offset,
+        ]);
         const countSql = `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`;
-        const countResult = await this.executeViaAgent(cluster, countSql, params);
-        return { data: dataResult.rows, total: Number.parseInt(countResult.rows[0]?.total ?? '0'), page, limit };
+        const countResult = await this.executeViaAgent(
+          cluster,
+          countSql,
+          params,
+        );
+        return {
+          data: dataResult.rows,
+          total: Number.parseInt(countResult.rows[0]?.total ?? '0'),
+          page,
+          limit,
+        };
       } else {
         sql = `SELECT * FROM ${escapedTableName}${where} LIMIT ? OFFSET ?`;
-        const dataResult = await this.executeViaAgent(cluster, sql, [...params, limit, offset]);
+        const dataResult = await this.executeViaAgent(cluster, sql, [
+          ...params,
+          limit,
+          offset,
+        ]);
         const countSql = `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`;
-        const countResult = await this.executeViaAgent(cluster, countSql, params);
-        return { data: dataResult.rows, total: countResult.rows[0]?.total ?? 0, page, limit };
+        const countResult = await this.executeViaAgent(
+          cluster,
+          countSql,
+          params,
+        );
+        return {
+          data: dataResult.rows,
+          total: countResult.rows[0]?.total ?? 0,
+          page,
+          limit,
+        };
       }
     }
 
@@ -675,7 +733,8 @@ export class ClustersService extends UserOwnedService<Cluster> {
     type: ClusterType,
     filters: any[],
   ): { where: string; params: any[]; namedParams: Record<string, any> } {
-    if (!filters || filters.length === 0) return { where: '', params: [], namedParams: {} };
+    if (!filters || filters.length === 0)
+      return { where: '', params: [], namedParams: {} };
     const params: any[] = [];
     const namedParams: Record<string, any> = {};
     const clauses = filters.map((f, i) => {
@@ -684,17 +743,40 @@ export class ClustersService extends UserOwnedService<Cluster> {
       let val = value;
       const col = this.escapeIdentifier(column, type);
       switch (operator) {
-        case 'is': op = '='; break;
-        case 'is_not': op = '!='; break;
-        case 'contains': op = 'LIKE'; val = `%${value}%`; break;
-        case 'not_contains': op = 'NOT LIKE'; val = `%${value}%`; break;
-        case 'starts_with': op = 'LIKE'; val = `${value}%`; break;
-        case 'ends_with': op = 'LIKE'; val = `%${value}`; break;
-        case 'gt': op = '>'; break;
-        case 'lt': op = '<'; break;
-        case 'is_null': return `${col} IS NULL`;
-        case 'is_not_null': return `${col} IS NOT NULL`;
-        default: op = '=';
+        case 'is':
+          op = '=';
+          break;
+        case 'is_not':
+          op = '!=';
+          break;
+        case 'contains':
+          op = 'LIKE';
+          val = `%${value}%`;
+          break;
+        case 'not_contains':
+          op = 'NOT LIKE';
+          val = `%${value}%`;
+          break;
+        case 'starts_with':
+          op = 'LIKE';
+          val = `${value}%`;
+          break;
+        case 'ends_with':
+          op = 'LIKE';
+          val = `%${value}`;
+          break;
+        case 'gt':
+          op = '>';
+          break;
+        case 'lt':
+          op = '<';
+          break;
+        case 'is_null':
+          return `${col} IS NULL`;
+        case 'is_not_null':
+          return `${col} IS NOT NULL`;
+        default:
+          op = '=';
       }
       if (type === ClusterType.MSSQL) {
         namedParams[`f${i}`] = val;
@@ -790,19 +872,53 @@ export class ClustersService extends UserOwnedService<Cluster> {
       const type = cluster.type;
       if (type === ClusterType.MSSQL) {
         const namedParams: Record<string, any> = {};
-        const set = Object.keys(data).map((k, i) => { namedParams[`v${i}`] = data[k]; return `${this.escapeIdentifier(k, type)} = @v${i}`; }).join(', ');
-        const cond = Object.keys(where).map((k, i) => { namedParams[`c${i}`] = where[k]; return `${this.escapeIdentifier(k, type)} = @c${i}`; }).join(' AND ');
-        const { rowCount } = await this.executeViaAgent(cluster, `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`, [], namedParams);
+        const set = Object.keys(data)
+          .map((k, i) => {
+            namedParams[`v${i}`] = data[k];
+            return `${this.escapeIdentifier(k, type)} = @v${i}`;
+          })
+          .join(', ');
+        const cond = Object.keys(where)
+          .map((k, i) => {
+            namedParams[`c${i}`] = where[k];
+            return `${this.escapeIdentifier(k, type)} = @c${i}`;
+          })
+          .join(' AND ');
+        const { rowCount } = await this.executeViaAgent(
+          cluster,
+          `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
+          [],
+          namedParams,
+        );
         return rowCount;
       } else if (type === ClusterType.POSTGRES) {
-        const set = Object.keys(data).map((k, i) => `${this.escapeIdentifier(k, type)} = $${i + 1}`).join(', ');
-        const cond = Object.keys(where).map((k, i) => `${this.escapeIdentifier(k, type)} = $${Object.keys(data).length + i + 1}`).join(' AND ');
-        const { rowCount } = await this.executeViaAgent(cluster, `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`, [...Object.values(data), ...Object.values(where)]);
+        const set = Object.keys(data)
+          .map((k, i) => `${this.escapeIdentifier(k, type)} = $${i + 1}`)
+          .join(', ');
+        const cond = Object.keys(where)
+          .map(
+            (k, i) =>
+              `${this.escapeIdentifier(k, type)} = $${Object.keys(data).length + i + 1}`,
+          )
+          .join(' AND ');
+        const { rowCount } = await this.executeViaAgent(
+          cluster,
+          `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
+          [...Object.values(data), ...Object.values(where)],
+        );
         return rowCount;
       } else {
-        const set = Object.keys(data).map((k) => `${this.escapeIdentifier(k, type)} = ?`).join(', ');
-        const cond = Object.keys(where).map((k) => `${this.escapeIdentifier(k, type)} = ?`).join(' AND ');
-        const { rowCount } = await this.executeViaAgent(cluster, `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`, [...Object.values(data), ...Object.values(where)]);
+        const set = Object.keys(data)
+          .map((k) => `${this.escapeIdentifier(k, type)} = ?`)
+          .join(', ');
+        const cond = Object.keys(where)
+          .map((k) => `${this.escapeIdentifier(k, type)} = ?`)
+          .join(' AND ');
+        const { rowCount } = await this.executeViaAgent(
+          cluster,
+          `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
+          [...Object.values(data), ...Object.values(where)],
+        );
         return rowCount;
       }
     }
@@ -905,16 +1021,34 @@ export class ClustersService extends UserOwnedService<Cluster> {
       const cols = keys.map((k) => this.escapeIdentifier(k, type)).join(', ');
       if (type === ClusterType.MSSQL) {
         const namedParams: Record<string, any> = {};
-        const placeholders = keys.map((k, i) => { namedParams[`v${i}`] = data[k]; return `@v${i}`; }).join(', ');
-        const { rows } = await this.executeViaAgent(cluster, `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}); SELECT SCOPE_IDENTITY() as id;`, [], namedParams);
+        const placeholders = keys
+          .map((k, i) => {
+            namedParams[`v${i}`] = data[k];
+            return `@v${i}`;
+          })
+          .join(', ');
+        const { rows } = await this.executeViaAgent(
+          cluster,
+          `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}); SELECT SCOPE_IDENTITY() as id;`,
+          [],
+          namedParams,
+        );
         return rows[0];
       } else if (type === ClusterType.POSTGRES) {
         const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
-        const { rows } = await this.executeViaAgent(cluster, `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}) RETURNING *`, Object.values(data));
+        const { rows } = await this.executeViaAgent(
+          cluster,
+          `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}) RETURNING *`,
+          Object.values(data),
+        );
         return rows[0];
       } else {
         const placeholders = keys.map(() => '?').join(', ');
-        return this.executeViaAgent(cluster, `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`, Object.values(data));
+        return this.executeViaAgent(
+          cluster,
+          `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`,
+          Object.values(data),
+        );
       }
     }
 
@@ -1000,16 +1134,38 @@ export class ClustersService extends UserOwnedService<Cluster> {
       const type = cluster.type;
       if (type === ClusterType.MSSQL) {
         const namedParams: Record<string, any> = {};
-        const cond = Object.keys(where).map((k, i) => { namedParams[`c${i}`] = where[k]; return `${this.escapeIdentifier(k, type)} = @c${i}`; }).join(' AND ');
-        const { rowCount } = await this.executeViaAgent(cluster, `DELETE FROM ${escapedTableName} WHERE ${cond}`, [], namedParams);
+        const cond = Object.keys(where)
+          .map((k, i) => {
+            namedParams[`c${i}`] = where[k];
+            return `${this.escapeIdentifier(k, type)} = @c${i}`;
+          })
+          .join(' AND ');
+        const { rowCount } = await this.executeViaAgent(
+          cluster,
+          `DELETE FROM ${escapedTableName} WHERE ${cond}`,
+          [],
+          namedParams,
+        );
         return rowCount;
       } else if (type === ClusterType.POSTGRES) {
-        const cond = Object.keys(where).map((k, i) => `${this.escapeIdentifier(k, type)} = $${i + 1}`).join(' AND ');
-        const { rowCount } = await this.executeViaAgent(cluster, `DELETE FROM ${escapedTableName} WHERE ${cond}`, Object.values(where));
+        const cond = Object.keys(where)
+          .map((k, i) => `${this.escapeIdentifier(k, type)} = $${i + 1}`)
+          .join(' AND ');
+        const { rowCount } = await this.executeViaAgent(
+          cluster,
+          `DELETE FROM ${escapedTableName} WHERE ${cond}`,
+          Object.values(where),
+        );
         return rowCount;
       } else {
-        const cond = Object.keys(where).map((k) => `${this.escapeIdentifier(k, type)} = ?`).join(' AND ');
-        const { rowCount } = await this.executeViaAgent(cluster, `DELETE FROM ${escapedTableName} WHERE ${cond}`, Object.values(where));
+        const cond = Object.keys(where)
+          .map((k) => `${this.escapeIdentifier(k, type)} = ?`)
+          .join(' AND ');
+        const { rowCount } = await this.executeViaAgent(
+          cluster,
+          `DELETE FROM ${escapedTableName} WHERE ${cond}`,
+          Object.values(where),
+        );
         return rowCount;
       }
     }
@@ -1477,10 +1633,18 @@ export class ClustersService extends UserOwnedService<Cluster> {
           if (dropDdl) await client.query(dropDdl);
           if (createDdl) await client.query(createDdl);
           if (withData && createDdl) {
-            const sourceData = await this.findTableData(sourceId, userId, tableName, 1, 1000);
+            const sourceData = await this.findTableData(
+              sourceId,
+              userId,
+              tableName,
+              1,
+              1000,
+            );
             for (const row of sourceData?.data ?? []) {
               const keys = Object.keys(row);
-              const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES)).join(', ');
+              const cols = keys
+                .map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES))
+                .join(', ');
               const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
               await client.query(
                 `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} (${cols}) VALUES (${placeholders})`,
@@ -1503,12 +1667,27 @@ export class ClustersService extends UserOwnedService<Cluster> {
           if (dropDdl) await new mssql.Request(transaction).query(dropDdl);
           if (createDdl) await new mssql.Request(transaction).query(createDdl);
           if (withData && createDdl) {
-            const sourceData = await this.findTableData(sourceId, userId, tableName, 1, 1000);
+            const sourceData = await this.findTableData(
+              sourceId,
+              userId,
+              tableName,
+              1,
+              1000,
+            );
             for (const row of sourceData?.data ?? []) {
               const req = new mssql.Request(transaction);
-              const cols = Object.keys(row).map((k) => this.escapeIdentifier(k, ClusterType.MSSQL)).join(', ');
-              const placeholders = Object.keys(row).map((k, i) => { req.input(`v${i}`, row[k]); return `@v${i}`; }).join(', ');
-              await req.query(`INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`);
+              const cols = Object.keys(row)
+                .map((k) => this.escapeIdentifier(k, ClusterType.MSSQL))
+                .join(', ');
+              const placeholders = Object.keys(row)
+                .map((k, i) => {
+                  req.input(`v${i}`, row[k]);
+                  return `@v${i}`;
+                })
+                .join(', ');
+              await req.query(
+                `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`,
+              );
             }
           }
           await transaction.commit();
@@ -1784,7 +1963,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         await client.query('COMMIT');
       } catch (e) {
         await client.query('ROLLBACK');
-        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+        throw new BadRequestException(
+          `Restore failed and was rolled back: ${e.message}`,
+        );
       } finally {
         client.release();
       }
@@ -1799,7 +1980,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         await transaction.commit();
       } catch (e) {
         await transaction.rollback();
-        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+        throw new BadRequestException(
+          `Restore failed and was rolled back: ${e.message}`,
+        );
       }
     } else {
       // MySQL: run inside a single connection to leverage its transaction support
@@ -1812,7 +1995,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         await conn.commit();
       } catch (e) {
         await conn.rollback();
-        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+        throw new BadRequestException(
+          `Restore failed and was rolled back: ${e.message}`,
+        );
       } finally {
         conn.release();
       }
@@ -1832,7 +2017,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         for (const tableName of Object.keys(data)) {
           for (const row of data[tableName] as any[]) {
             const keys = Object.keys(row);
-            const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES)).join(', ');
+            const cols = keys
+              .map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES))
+              .join(', ');
             const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
             await client.query(
               `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} (${cols}) VALUES (${placeholders})`,
@@ -1843,7 +2030,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         await client.query('COMMIT');
       } catch (e) {
         await client.query('ROLLBACK');
-        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+        throw new BadRequestException(
+          `Restore failed and was rolled back: ${e.message}`,
+        );
       } finally {
         client.release();
       }
@@ -1855,15 +2044,26 @@ export class ClustersService extends UserOwnedService<Cluster> {
         for (const tableName of Object.keys(data)) {
           for (const row of data[tableName] as any[]) {
             const req = new mssql.Request(transaction);
-            const cols = Object.keys(row).map((k) => this.escapeIdentifier(k, ClusterType.MSSQL)).join(', ');
-            const placeholders = Object.keys(row).map((k, i) => { req.input(`v${i}`, row[k]); return `@v${i}`; }).join(', ');
-            await req.query(`INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`);
+            const cols = Object.keys(row)
+              .map((k) => this.escapeIdentifier(k, ClusterType.MSSQL))
+              .join(', ');
+            const placeholders = Object.keys(row)
+              .map((k, i) => {
+                req.input(`v${i}`, row[k]);
+                return `@v${i}`;
+              })
+              .join(', ');
+            await req.query(
+              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`,
+            );
           }
         }
         await transaction.commit();
       } catch (e) {
         await transaction.rollback();
-        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+        throw new BadRequestException(
+          `Restore failed and was rolled back: ${e.message}`,
+        );
       }
     } else {
       const conn = await this.getMySQLPool(cluster).getConnection();
@@ -1872,7 +2072,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         for (const tableName of Object.keys(data)) {
           for (const row of data[tableName] as any[]) {
             const keys = Object.keys(row);
-            const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.MYSQL)).join(', ');
+            const cols = keys
+              .map((k) => this.escapeIdentifier(k, ClusterType.MYSQL))
+              .join(', ');
             const placeholders = keys.map(() => '?').join(', ');
             await conn.query(
               `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MYSQL)} (${cols}) VALUES (${placeholders})`,
@@ -1883,7 +2085,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         await conn.commit();
       } catch (e) {
         await conn.rollback();
-        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+        throw new BadRequestException(
+          `Restore failed and was rolled back: ${e.message}`,
+        );
       } finally {
         conn.release();
       }
@@ -1898,7 +2102,10 @@ export class ClustersService extends UserOwnedService<Cluster> {
       const lines = (data[tableName] as string).split('\n');
       if (lines.length < 2) return { tableName, rows: [] };
       const headers = lines[0].split(',');
-      const rows = lines.slice(1).filter(Boolean).map((line) => this.parseCSVRow(headers, line));
+      const rows = lines
+        .slice(1)
+        .filter(Boolean)
+        .map((line) => this.parseCSVRow(headers, line));
       return { tableName, rows };
     });
 
@@ -1910,7 +2117,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         for (const { tableName, rows } of tableEntries) {
           for (const row of rows) {
             const keys = Object.keys(row);
-            const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES)).join(', ');
+            const cols = keys
+              .map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES))
+              .join(', ');
             const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
             await client.query(
               `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} (${cols}) VALUES (${placeholders})`,
@@ -1921,7 +2130,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         await client.query('COMMIT');
       } catch (e) {
         await client.query('ROLLBACK');
-        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+        throw new BadRequestException(
+          `Restore failed and was rolled back: ${e.message}`,
+        );
       } finally {
         client.release();
       }
@@ -1933,15 +2144,26 @@ export class ClustersService extends UserOwnedService<Cluster> {
         for (const { tableName, rows } of tableEntries) {
           for (const row of rows) {
             const req = new mssql.Request(transaction);
-            const cols = Object.keys(row).map((k) => this.escapeIdentifier(k, ClusterType.MSSQL)).join(', ');
-            const placeholders = Object.keys(row).map((k, i) => { req.input(`v${i}`, row[k]); return `@v${i}`; }).join(', ');
-            await req.query(`INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`);
+            const cols = Object.keys(row)
+              .map((k) => this.escapeIdentifier(k, ClusterType.MSSQL))
+              .join(', ');
+            const placeholders = Object.keys(row)
+              .map((k, i) => {
+                req.input(`v${i}`, row[k]);
+                return `@v${i}`;
+              })
+              .join(', ');
+            await req.query(
+              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`,
+            );
           }
         }
         await transaction.commit();
       } catch (e) {
         await transaction.rollback();
-        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+        throw new BadRequestException(
+          `Restore failed and was rolled back: ${e.message}`,
+        );
       }
     } else {
       const conn = await this.getMySQLPool(cluster).getConnection();
@@ -1950,7 +2172,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         for (const { tableName, rows } of tableEntries) {
           for (const row of rows) {
             const keys = Object.keys(row);
-            const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.MYSQL)).join(', ');
+            const cols = keys
+              .map((k) => this.escapeIdentifier(k, ClusterType.MYSQL))
+              .join(', ');
             const placeholders = keys.map(() => '?').join(', ');
             await conn.query(
               `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MYSQL)} (${cols}) VALUES (${placeholders})`,
@@ -1961,7 +2185,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
         await conn.commit();
       } catch (e) {
         await conn.rollback();
-        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+        throw new BadRequestException(
+          `Restore failed and was rolled back: ${e.message}`,
+        );
       } finally {
         conn.release();
       }
@@ -1982,21 +2208,26 @@ export class ClustersService extends UserOwnedService<Cluster> {
   async getAgentStatus(id: string, userId: string) {
     const cluster = await this.findOne(id, userId);
     if (!cluster.isLocal) return { isLocal: false, connected: null };
-    return { isLocal: true, connected: this.agentService.isAgentConnected(cluster.agentKey!) };
+    return {
+      isLocal: true,
+      connected: this.agentService.isAgentConnected(cluster.agentKey!),
+    };
   }
 
   async getAgentKey(id: string, userId: string) {
     // Bypass class-transformer so agentKey (no @Expose) is accessible
     const cluster = await this.repository.findOne({ where: { id, userId } });
     if (!cluster) throw new BadRequestException('Cluster not found');
-    if (!cluster.isLocal) throw new BadRequestException('Cluster is not a local cluster');
+    if (!cluster.isLocal)
+      throw new BadRequestException('Cluster is not a local cluster');
     return { agentKey: cluster.agentKey };
   }
 
   async rotateAgentKey(id: string, userId: string) {
     const cluster = await this.repository.findOne({ where: { id, userId } });
     if (!cluster) throw new BadRequestException('Cluster not found');
-    if (!cluster.isLocal) throw new BadRequestException('Cluster is not a local cluster');
+    if (!cluster.isLocal)
+      throw new BadRequestException('Cluster is not a local cluster');
 
     // Disconnect any currently connected agent for the old key
     if (cluster.agentKey) {
