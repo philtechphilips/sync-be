@@ -206,4 +206,19 @@ export class ClustersController extends UserOwnedController<Cluster> {
       body.data,
     );
   }
+
+  @Get(':id/agent-status')
+  async getAgentStatus(@Request() req: any, @Param('id') id: string) {
+    return this.clustersService.getAgentStatus(id, req.user.id);
+  }
+
+  @Get(':id/agent-key')
+  async getAgentKey(@Request() req: any, @Param('id') id: string) {
+    return this.clustersService.getAgentKey(id, req.user.id);
+  }
+
+  @Post(':id/rotate-agent-key')
+  async rotateAgentKey(@Request() req: any, @Param('id') id: string) {
+    return this.clustersService.rotateAgentKey(id, req.user.id);
+  }
 }

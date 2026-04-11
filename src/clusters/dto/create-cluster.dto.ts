@@ -1,4 +1,4 @@
-import { IsString, IsEnum, IsNumber, IsOptional } from 'class-validator';
+import { IsString, IsEnum, IsNumber, IsOptional, IsBoolean } from 'class-validator';
 import { ClusterType, ClusterEnvironment } from '../entities/cluster.entity';
 
 export class CreateClusterDto {
@@ -31,4 +31,8 @@ export class CreateClusterDto {
 
   @IsString()
   database: string;
+
+  @IsBoolean()
+  @IsOptional()
+  isLocal?: boolean;
 }

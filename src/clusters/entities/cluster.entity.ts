@@ -56,4 +56,12 @@ export class Cluster extends UserOwnedEntity {
   @Expose()
   @Column({ type: 'text', nullable: true })
   color: string;
+
+  @Expose()
+  @Column({ type: 'boolean', default: false })
+  isLocal: boolean;
+
+  // NOT @Expose() — never serialised into REST responses
+  @Column({ type: 'varchar', length: 64, nullable: true, unique: true })
+  agentKey: string | null;
 }

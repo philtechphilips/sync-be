@@ -4,10 +4,12 @@ import { Repository } from 'typeorm';
 import * as mysql from 'mysql2/promise';
 import { Client } from 'pg';
 import * as mssql from 'mssql';
+import { randomUUID } from 'crypto';
 import { Cluster, ClusterType } from './entities/cluster.entity';
 import { QueryLog } from './entities/query-log.entity';
 import { CreateClusterDto } from './dto/create-cluster.dto';
 import { CryptographyService } from '../common/services/cryptography.service';
+import { AgentService } from '../agent/agent.service';
 
 import { UserOwnedService } from '../common/services/user-owned.service';
 
@@ -23,8 +25,24 @@ export class ClustersService extends UserOwnedService<Cluster> {
     @InjectRepository(QueryLog)
     private readonly queryLogRepo: Repository<QueryLog>,
     private readonly cryptographyService: CryptographyService,
+    private readonly agentService: AgentService,
   ) {
     super(clusterRepo, 'Cluster');
+  }
+
+  private async executeViaAgent(
+    cluster: Cluster,
+    sql: string,
+    params: any[] = [],
+    namedParams: Record<string, any> = {},
+  ): Promise<{ rows: any[]; rowCount: number }> {
+    // agentKey is guaranteed non-null when isLocal is true
+    return this.agentService.routeQuery(
+      { ...cluster, agentKey: cluster.agentKey! },
+      sql,
+      params,
+      namedParams,
+    );
   }
 
   private getMySQLPool(cluster: Cluster): mysql.Pool {
@@ -199,9 +217,15 @@ export class ClustersService extends UserOwnedService<Cluster> {
   }
 
   async create(userId: string, createClusterDto: CreateClusterDto) {
-    await this.testConnection(createClusterDto);
+    const isLocal = createClusterDto.isLocal ?? false;
+    if (!isLocal) {
+      await this.testConnection(createClusterDto);
+    }
+    const agentKey = isLocal ? randomUUID() : null;
     const cluster = this.repository.create({
       ...createClusterDto,
+      isLocal,
+      agentKey,
       name: this.cryptographyService.encrypt(createClusterDto.name) as string,
       host: this.cryptographyService.encrypt(createClusterDto.host) as string,
       username: this.cryptographyService.encrypt(
@@ -216,12 +240,31 @@ export class ClustersService extends UserOwnedService<Cluster> {
       userId,
     });
     const saved = await this.repository.save(cluster);
-    return this.decryptCluster(saved);
+    const decrypted = this.decryptCluster(saved);
+    // Return agentKey once only for local clusters — it's never exposed via GET
+    if (isLocal) return { ...decrypted, agentKey };
+    return decrypted;
   }
 
   async findTables(id: string, userId: string) {
     const cluster = await this.findClusterForConnection(id, userId);
     const { type, database } = cluster;
+
+    if (cluster.isLocal) {
+      let sql: string;
+      let params: any[] = [];
+      if (type === ClusterType.MYSQL) {
+        sql = 'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ? ORDER BY table_name ASC';
+        params = [database, 'BASE TABLE'];
+      } else if (type === ClusterType.POSTGRES) {
+        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name ASC";
+      } else {
+        sql = `SELECT TABLE_NAME as name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_CATALOG = @database ORDER BY TABLE_NAME ASC`;
+        return (await this.executeViaAgent(cluster, sql, [], { database })).rows;
+      }
+      const { rows } = await this.executeViaAgent(cluster, sql, params);
+      return rows.map((row: any) => ({ name: row.TABLE_NAME || row.table_name }));
+    }
 
     if (type === ClusterType.MYSQL) {
       const pool = this.getMySQLPool(cluster);
@@ -253,6 +296,29 @@ export class ClustersService extends UserOwnedService<Cluster> {
 
   private async validateTableExists(cluster: Cluster, tableName: string) {
     const { type, database } = cluster;
+
+    if (cluster.isLocal) {
+      let sql: string;
+      let params: any[] = [];
+      let namedParams: Record<string, any> = {};
+      if (type === ClusterType.MYSQL) {
+        sql = 'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_name = ?';
+        params = [database, tableName];
+      } else if (type === ClusterType.POSTGRES) {
+        sql = "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)";
+        params = [tableName];
+      } else {
+        sql = 'SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @tableName AND TABLE_CATALOG = @database';
+        namedParams = { tableName, database };
+      }
+      const { rows } = await this.executeViaAgent(cluster, sql, params, namedParams);
+      const exists = type === ClusterType.POSTGRES
+        ? rows[0]?.exists
+        : rows.length > 0;
+      if (!exists) throw new BadRequestException(`Table '${tableName}' not found!`);
+      return;
+    }
+
     if (type === ClusterType.MYSQL) {
       const pool = this.getMySQLPool(cluster);
       const [rows]: [any[], any] = await pool.query(
@@ -287,6 +353,35 @@ export class ClustersService extends UserOwnedService<Cluster> {
     const cluster = await this.findClusterForConnection(id, userId);
     const { type, database } = cluster;
     await this.validateTableExists(cluster, tableName);
+
+    if (cluster.isLocal) {
+      let sql: string;
+      let params: any[] = [];
+      let namedParams: Record<string, any> = {};
+      if (type === ClusterType.MYSQL) {
+        sql = `SELECT cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.COLUMN_TYPE as fullType, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, cols.COLUMN_KEY as columnKey, fk.referencedTable, fk.referencedColumn
+               FROM information_schema.columns cols
+               LEFT JOIN (SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME as referencedTable, REFERENCED_COLUMN_NAME as referencedColumn FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME) fk
+               ON cols.TABLE_SCHEMA = fk.TABLE_SCHEMA AND cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
+               WHERE cols.table_schema = ? AND cols.table_name = ? ORDER BY cols.ORDINAL_POSITION`;
+        params = [database, tableName];
+      } else if (type === ClusterType.POSTGRES) {
+        sql = `SELECT DISTINCT ON (cols.ordinal_position) cols.column_name as name, cols.data_type as type, cols.is_nullable as nullable, cols.column_default as "defaultValue", cols.udt_name as "udtName", (SELECT string_agg(enumlabel, ',') FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = cols.udt_name) as "enumValues", kcu.referenced_table_name as "referencedTable", kcu.referenced_column_name as "referencedColumn"
+               FROM information_schema.columns cols
+               LEFT JOIN (SELECT kcu.table_name, kcu.column_name, ccu.table_name AS referenced_table_name, ccu.column_name AS referenced_column_name FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY') kcu
+               ON cols.table_name = kcu.table_name AND cols.column_name = kcu.column_name
+               WHERE cols.table_schema = 'public' AND cols.table_name = $1 ORDER BY cols.ordinal_position`;
+        params = [tableName];
+      } else {
+        sql = `SELECT cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, fk.referencedTable, fk.referencedColumn
+               FROM INFORMATION_SCHEMA.COLUMNS cols
+               LEFT JOIN (SELECT fk.name AS constraint_name, OBJECT_NAME(fk.parent_object_id) AS TABLE_NAME, col.name AS COLUMN_NAME, OBJECT_NAME(fk.referenced_object_id) AS referencedTable, ref_col.name AS referencedColumn FROM sys.foreign_keys AS fk INNER JOIN sys.foreign_key_columns AS fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.columns AS col ON fkc.parent_object_id = col.object_id AND fkc.parent_column_id = col.column_id INNER JOIN sys.columns AS ref_col ON fkc.referenced_object_id = ref_col.object_id AND fkc.referenced_column_id = ref_col.column_id) fk
+               ON cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
+               WHERE cols.TABLE_NAME = @tableName AND cols.TABLE_CATALOG = @database ORDER BY cols.ORDINAL_POSITION`;
+        namedParams = { tableName, database };
+      }
+      return (await this.executeViaAgent(cluster, sql, params, namedParams)).rows;
+    }
 
     if (type === ClusterType.MYSQL) {
       const [rows]: [any[], any] = await this.getMySQLPool(cluster).query(
@@ -326,6 +421,34 @@ export class ClustersService extends UserOwnedService<Cluster> {
   async getSchema(id: string, userId: string) {
     const cluster = await this.findClusterForConnection(id, userId);
     const { type, database } = cluster;
+
+    if (cluster.isLocal) {
+      let sql: string;
+      let params: any[] = [];
+      let namedParams: Record<string, any> = {};
+      if (type === ClusterType.MYSQL) {
+        sql = `SELECT cols.TABLE_NAME as tableName, cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.COLUMN_TYPE as fullType, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, cols.COLUMN_KEY as columnKey, fk.referencedTable, fk.referencedColumn
+               FROM information_schema.columns cols
+               LEFT JOIN (SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME as referencedTable, REFERENCED_COLUMN_NAME as referencedColumn FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME) fk
+               ON cols.TABLE_SCHEMA = fk.TABLE_SCHEMA AND cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
+               WHERE cols.table_schema = ?`;
+        params = [database];
+      } else if (type === ClusterType.POSTGRES) {
+        sql = `SELECT DISTINCT ON (cols.table_name, cols.ordinal_position) cols.table_name as "tableName", cols.column_name as name, cols.data_type as type, cols.is_nullable as nullable, cols.column_default as "defaultValue", cols.udt_name as "udtName", kcu.referenced_table_name as "referencedTable", kcu.referenced_column_name as "referencedColumn"
+               FROM information_schema.columns cols
+               LEFT JOIN (SELECT kcu.table_name, kcu.column_name, ccu.table_name AS referenced_table_name, ccu.column_name AS referenced_column_name FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY') kcu
+               ON cols.table_name = kcu.table_name AND cols.column_name = kcu.column_name
+               WHERE cols.table_schema = 'public' ORDER BY cols.table_name, cols.ordinal_position`;
+      } else {
+        sql = `SELECT cols.TABLE_NAME as tableName, cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, fk.referencedTable, fk.referencedColumn
+               FROM INFORMATION_SCHEMA.COLUMNS cols
+               LEFT JOIN (SELECT fk.name AS constraint_name, OBJECT_NAME(fk.parent_object_id) AS TABLE_NAME, col.name AS COLUMN_NAME, OBJECT_NAME(fk.referenced_object_id) AS referencedTable, ref_col.name AS referencedColumn FROM sys.foreign_keys AS fk INNER JOIN sys.foreign_key_columns AS fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.columns AS col ON fkc.parent_object_id = col.object_id AND fkc.parent_column_id = col.column_id INNER JOIN sys.columns AS ref_col ON fkc.referenced_object_id = ref_col.object_id AND fkc.referenced_column_id = ref_col.column_id) fk
+               ON cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
+               WHERE cols.TABLE_CATALOG = @database ORDER BY cols.TABLE_NAME, cols.ORDINAL_POSITION`;
+        namedParams = { database };
+      }
+      return (await this.executeViaAgent(cluster, sql, params, namedParams)).rows;
+    }
 
     if (type === ClusterType.MYSQL) {
       const [rows]: [any[], any] = await this.getMySQLPool(cluster).query(
@@ -386,6 +509,30 @@ export class ClustersService extends UserOwnedService<Cluster> {
     await this.validateTableExists(cluster, tableName);
     const offset = (page - 1) * limit;
     const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
+
+    if (cluster.isLocal) {
+      const { where, params, namedParams } = this.buildWhereClauseForAgent(cluster.type, filters);
+      let sql: string;
+      if (cluster.type === ClusterType.MSSQL) {
+        sql = `SELECT * FROM ${escapedTableName}${where} ORDER BY (SELECT NULL) OFFSET @__offset ROWS FETCH NEXT @__limit ROWS ONLY`;
+        const dataResult = await this.executeViaAgent(cluster, sql, [], { ...namedParams, __offset: offset, __limit: limit });
+        const countSql = `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`;
+        const countResult = await this.executeViaAgent(cluster, countSql, [], namedParams);
+        return { data: dataResult.rows, total: countResult.rows[0]?.total ?? 0, page, limit };
+      } else if (cluster.type === ClusterType.POSTGRES) {
+        sql = `SELECT * FROM ${escapedTableName}${where} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        const dataResult = await this.executeViaAgent(cluster, sql, [...params, limit, offset]);
+        const countSql = `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`;
+        const countResult = await this.executeViaAgent(cluster, countSql, params);
+        return { data: dataResult.rows, total: Number.parseInt(countResult.rows[0]?.total ?? '0'), page, limit };
+      } else {
+        sql = `SELECT * FROM ${escapedTableName}${where} LIMIT ? OFFSET ?`;
+        const dataResult = await this.executeViaAgent(cluster, sql, [...params, limit, offset]);
+        const countSql = `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`;
+        const countResult = await this.executeViaAgent(cluster, countSql, params);
+        return { data: dataResult.rows, total: countResult.rows[0]?.total ?? 0, page, limit };
+      }
+    }
 
     switch (cluster.type) {
       case ClusterType.MYSQL:
@@ -523,6 +670,46 @@ export class ClustersService extends UserOwnedService<Cluster> {
     };
   }
 
+  // Like buildWhereClause but for agent queries — MSSQL named params go into namedParams object
+  private buildWhereClauseForAgent(
+    type: ClusterType,
+    filters: any[],
+  ): { where: string; params: any[]; namedParams: Record<string, any> } {
+    if (!filters || filters.length === 0) return { where: '', params: [], namedParams: {} };
+    const params: any[] = [];
+    const namedParams: Record<string, any> = {};
+    const clauses = filters.map((f, i) => {
+      const { column, operator, value } = f;
+      let op = '';
+      let val = value;
+      const col = this.escapeIdentifier(column, type);
+      switch (operator) {
+        case 'is': op = '='; break;
+        case 'is_not': op = '!='; break;
+        case 'contains': op = 'LIKE'; val = `%${value}%`; break;
+        case 'not_contains': op = 'NOT LIKE'; val = `%${value}%`; break;
+        case 'starts_with': op = 'LIKE'; val = `${value}%`; break;
+        case 'ends_with': op = 'LIKE'; val = `%${value}`; break;
+        case 'gt': op = '>'; break;
+        case 'lt': op = '<'; break;
+        case 'is_null': return `${col} IS NULL`;
+        case 'is_not_null': return `${col} IS NOT NULL`;
+        default: op = '=';
+      }
+      if (type === ClusterType.MSSQL) {
+        namedParams[`f${i}`] = val;
+        return `${col} ${op} @f${i}`;
+      } else if (type === ClusterType.POSTGRES) {
+        params.push(val);
+        return `${col} ${op} $${params.length}`;
+      } else {
+        params.push(val);
+        return `${col} ${op} ?`;
+      }
+    });
+    return { where: ' WHERE ' + clauses.join(' AND '), params, namedParams };
+  }
+
   private buildWhereClause(
     type: ClusterType,
     filters: any[],
@@ -598,6 +785,27 @@ export class ClustersService extends UserOwnedService<Cluster> {
     const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
     const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
+
+    if (cluster.isLocal) {
+      const type = cluster.type;
+      if (type === ClusterType.MSSQL) {
+        const namedParams: Record<string, any> = {};
+        const set = Object.keys(data).map((k, i) => { namedParams[`v${i}`] = data[k]; return `${this.escapeIdentifier(k, type)} = @v${i}`; }).join(', ');
+        const cond = Object.keys(where).map((k, i) => { namedParams[`c${i}`] = where[k]; return `${this.escapeIdentifier(k, type)} = @c${i}`; }).join(' AND ');
+        const { rowCount } = await this.executeViaAgent(cluster, `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`, [], namedParams);
+        return rowCount;
+      } else if (type === ClusterType.POSTGRES) {
+        const set = Object.keys(data).map((k, i) => `${this.escapeIdentifier(k, type)} = $${i + 1}`).join(', ');
+        const cond = Object.keys(where).map((k, i) => `${this.escapeIdentifier(k, type)} = $${Object.keys(data).length + i + 1}`).join(' AND ');
+        const { rowCount } = await this.executeViaAgent(cluster, `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`, [...Object.values(data), ...Object.values(where)]);
+        return rowCount;
+      } else {
+        const set = Object.keys(data).map((k) => `${this.escapeIdentifier(k, type)} = ?`).join(', ');
+        const cond = Object.keys(where).map((k) => `${this.escapeIdentifier(k, type)} = ?`).join(' AND ');
+        const { rowCount } = await this.executeViaAgent(cluster, `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`, [...Object.values(data), ...Object.values(where)]);
+        return rowCount;
+      }
+    }
 
     switch (cluster.type) {
       case ClusterType.MYSQL:
@@ -691,6 +899,25 @@ export class ClustersService extends UserOwnedService<Cluster> {
     await this.validateTableExists(cluster, tableName);
     const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
 
+    if (cluster.isLocal) {
+      const type = cluster.type;
+      const keys = Object.keys(data);
+      const cols = keys.map((k) => this.escapeIdentifier(k, type)).join(', ');
+      if (type === ClusterType.MSSQL) {
+        const namedParams: Record<string, any> = {};
+        const placeholders = keys.map((k, i) => { namedParams[`v${i}`] = data[k]; return `@v${i}`; }).join(', ');
+        const { rows } = await this.executeViaAgent(cluster, `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}); SELECT SCOPE_IDENTITY() as id;`, [], namedParams);
+        return rows[0];
+      } else if (type === ClusterType.POSTGRES) {
+        const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
+        const { rows } = await this.executeViaAgent(cluster, `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}) RETURNING *`, Object.values(data));
+        return rows[0];
+      } else {
+        const placeholders = keys.map(() => '?').join(', ');
+        return this.executeViaAgent(cluster, `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`, Object.values(data));
+      }
+    }
+
     switch (cluster.type) {
       case ClusterType.MYSQL:
         return this.runInsertMySQL(cluster, escapedTableName, data);
@@ -768,6 +995,24 @@ export class ClustersService extends UserOwnedService<Cluster> {
     const cluster = await this.findClusterForConnection(id, userId);
     await this.validateTableExists(cluster, tableName);
     const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
+
+    if (cluster.isLocal) {
+      const type = cluster.type;
+      if (type === ClusterType.MSSQL) {
+        const namedParams: Record<string, any> = {};
+        const cond = Object.keys(where).map((k, i) => { namedParams[`c${i}`] = where[k]; return `${this.escapeIdentifier(k, type)} = @c${i}`; }).join(' AND ');
+        const { rowCount } = await this.executeViaAgent(cluster, `DELETE FROM ${escapedTableName} WHERE ${cond}`, [], namedParams);
+        return rowCount;
+      } else if (type === ClusterType.POSTGRES) {
+        const cond = Object.keys(where).map((k, i) => `${this.escapeIdentifier(k, type)} = $${i + 1}`).join(' AND ');
+        const { rowCount } = await this.executeViaAgent(cluster, `DELETE FROM ${escapedTableName} WHERE ${cond}`, Object.values(where));
+        return rowCount;
+      } else {
+        const cond = Object.keys(where).map((k) => `${this.escapeIdentifier(k, type)} = ?`).join(' AND ');
+        const { rowCount } = await this.executeViaAgent(cluster, `DELETE FROM ${escapedTableName} WHERE ${cond}`, Object.values(where));
+        return rowCount;
+      }
+    }
 
     switch (cluster.type) {
       case ClusterType.MYSQL:
@@ -918,6 +1163,26 @@ export class ClustersService extends UserOwnedService<Cluster> {
     usePagination: boolean,
     baseQuery: string,
   ): Promise<{ results: any; totals: number[] }> {
+    if (cluster.isLocal) {
+      const { rows } = await this.executeViaAgent(cluster, execQuery);
+      const results = [rows];
+      let totals: number[];
+      if (usePagination) {
+        const safeBase = baseQuery.trim().replace(/;$/, '');
+        let countSql: string;
+        if (cluster.type === ClusterType.MSSQL) {
+          countSql = `SELECT COUNT(*) as total FROM (${safeBase}) AS __synq_count`;
+        } else {
+          countSql = `SELECT COUNT(*) as total FROM (${safeBase}) AS __synq_count`;
+        }
+        const countRes = await this.executeViaAgent(cluster, countSql);
+        totals = [Number(countRes.rows[0]?.total ?? 0)];
+      } else {
+        totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
+      }
+      return { results, totals };
+    }
+
     switch (cluster.type) {
       case ClusterType.MYSQL:
         return this.runMySQL(cluster, execQuery, usePagination, baseQuery);
@@ -1198,12 +1463,66 @@ export class ClustersService extends UserOwnedService<Cluster> {
     let success = true;
     let error = null;
 
-    try {
-      if (dropDdl) await this.executeQuery(targetId, userId, dropDdl);
-      if (createDdl) await this.executeQuery(targetId, userId, createDdl);
+    const targetCluster = await this.findClusterForConnection(targetId, userId);
 
-      if (withData && createDdl) {
-        await this.syncTableData(sourceId, targetId, userId, tableName);
+    try {
+      // PostgreSQL and MSSQL support transactional DDL — wrap DROP+CREATE+data
+      // in a single transaction so a failure doesn't leave a missing table.
+      // MySQL auto-commits DDL so we do a best-effort sequential approach.
+      if (targetType === ClusterType.POSTGRES) {
+        const pool = this.getPGPool(targetCluster);
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          if (dropDdl) await client.query(dropDdl);
+          if (createDdl) await client.query(createDdl);
+          if (withData && createDdl) {
+            const sourceData = await this.findTableData(sourceId, userId, tableName, 1, 1000);
+            for (const row of sourceData?.data ?? []) {
+              const keys = Object.keys(row);
+              const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES)).join(', ');
+              const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
+              await client.query(
+                `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} (${cols}) VALUES (${placeholders})`,
+                Object.values(row),
+              );
+            }
+          }
+          await client.query('COMMIT');
+        } catch (e) {
+          await client.query('ROLLBACK');
+          throw e;
+        } finally {
+          client.release();
+        }
+      } else if (targetType === ClusterType.MSSQL) {
+        const pool = await this.getMSSQLPool(targetCluster);
+        const transaction = new mssql.Transaction(pool);
+        await transaction.begin();
+        try {
+          if (dropDdl) await new mssql.Request(transaction).query(dropDdl);
+          if (createDdl) await new mssql.Request(transaction).query(createDdl);
+          if (withData && createDdl) {
+            const sourceData = await this.findTableData(sourceId, userId, tableName, 1, 1000);
+            for (const row of sourceData?.data ?? []) {
+              const req = new mssql.Request(transaction);
+              const cols = Object.keys(row).map((k) => this.escapeIdentifier(k, ClusterType.MSSQL)).join(', ');
+              const placeholders = Object.keys(row).map((k, i) => { req.input(`v${i}`, row[k]); return `@v${i}`; }).join(', ');
+              await req.query(`INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`);
+            }
+          }
+          await transaction.commit();
+        } catch (e) {
+          await transaction.rollback();
+          throw e;
+        }
+      } else {
+        // MySQL: DDL is auto-committed — run sequentially, best-effort
+        if (dropDdl) await this.executeQuery(targetId, userId, dropDdl);
+        if (createDdl) await this.executeQuery(targetId, userId, createDdl);
+        if (withData && createDdl) {
+          await this.syncTableData(sourceId, targetId, userId, tableName);
+        }
       }
     } catch (e) {
       success = false;
@@ -1452,37 +1771,202 @@ export class ClustersService extends UserOwnedService<Cluster> {
       .map((q) => q.trim())
       .filter((q) => q.length > 0);
 
-    for (const query of queries) {
+    const cluster = await this.findClusterForConnection(id, userId);
+
+    if (cluster.type === ClusterType.POSTGRES) {
+      const pool = this.getPGPool(cluster);
+      const client = await pool.connect();
       try {
-        await this.executeQuery(id, userId, query);
+        await client.query('BEGIN');
+        for (const query of queries) {
+          await client.query(query);
+        }
+        await client.query('COMMIT');
       } catch (e) {
-        console.error(`Failed to execute restore query: ${query}`, e);
+        await client.query('ROLLBACK');
+        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+      } finally {
+        client.release();
+      }
+    } else if (cluster.type === ClusterType.MSSQL) {
+      const pool = await this.getMSSQLPool(cluster);
+      const transaction = new mssql.Transaction(pool);
+      await transaction.begin();
+      try {
+        for (const query of queries) {
+          await new mssql.Request(transaction).query(query);
+        }
+        await transaction.commit();
+      } catch (e) {
+        await transaction.rollback();
+        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+      }
+    } else {
+      // MySQL: run inside a single connection to leverage its transaction support
+      const conn = await this.getMySQLPool(cluster).getConnection();
+      try {
+        await conn.beginTransaction();
+        for (const query of queries) {
+          await conn.query(query);
+        }
+        await conn.commit();
+      } catch (e) {
+        await conn.rollback();
+        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+      } finally {
+        conn.release();
       }
     }
+
     return { success: true };
   }
 
   private async restoreJSON(id: string, userId: string, data: any) {
-    for (const tableName of Object.keys(data)) {
-      for (const row of data[tableName] as any[]) {
-        await this.insertTableData(id, userId, tableName, row);
+    const cluster = await this.findClusterForConnection(id, userId);
+
+    if (cluster.type === ClusterType.POSTGRES) {
+      const pool = this.getPGPool(cluster);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const tableName of Object.keys(data)) {
+          for (const row of data[tableName] as any[]) {
+            const keys = Object.keys(row);
+            const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES)).join(', ');
+            const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
+            await client.query(
+              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} (${cols}) VALUES (${placeholders})`,
+              Object.values(row),
+            );
+          }
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+      } finally {
+        client.release();
+      }
+    } else if (cluster.type === ClusterType.MSSQL) {
+      const pool = await this.getMSSQLPool(cluster);
+      const transaction = new mssql.Transaction(pool);
+      await transaction.begin();
+      try {
+        for (const tableName of Object.keys(data)) {
+          for (const row of data[tableName] as any[]) {
+            const req = new mssql.Request(transaction);
+            const cols = Object.keys(row).map((k) => this.escapeIdentifier(k, ClusterType.MSSQL)).join(', ');
+            const placeholders = Object.keys(row).map((k, i) => { req.input(`v${i}`, row[k]); return `@v${i}`; }).join(', ');
+            await req.query(`INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`);
+          }
+        }
+        await transaction.commit();
+      } catch (e) {
+        await transaction.rollback();
+        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+      }
+    } else {
+      const conn = await this.getMySQLPool(cluster).getConnection();
+      try {
+        await conn.beginTransaction();
+        for (const tableName of Object.keys(data)) {
+          for (const row of data[tableName] as any[]) {
+            const keys = Object.keys(row);
+            const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.MYSQL)).join(', ');
+            const placeholders = keys.map(() => '?').join(', ');
+            await conn.query(
+              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MYSQL)} (${cols}) VALUES (${placeholders})`,
+              Object.values(row),
+            );
+          }
+        }
+        await conn.commit();
+      } catch (e) {
+        await conn.rollback();
+        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+      } finally {
+        conn.release();
       }
     }
+
     return { success: true };
   }
 
   private async restoreCSV(id: string, userId: string, data: any) {
-    for (const tableName of Object.keys(data)) {
+    const cluster = await this.findClusterForConnection(id, userId);
+    const tableEntries = Object.keys(data).map((tableName) => {
       const lines = (data[tableName] as string).split('\n');
-      if (lines.length < 2) continue;
-
+      if (lines.length < 2) return { tableName, rows: [] };
       const headers = lines[0].split(',');
-      for (let i = 1; i < lines.length; i++) {
-        if (!lines[i]) continue;
-        const row = this.parseCSVRow(headers, lines[i]);
-        await this.insertTableData(id, userId, tableName, row);
+      const rows = lines.slice(1).filter(Boolean).map((line) => this.parseCSVRow(headers, line));
+      return { tableName, rows };
+    });
+
+    if (cluster.type === ClusterType.POSTGRES) {
+      const pool = this.getPGPool(cluster);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const { tableName, rows } of tableEntries) {
+          for (const row of rows) {
+            const keys = Object.keys(row);
+            const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES)).join(', ');
+            const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
+            await client.query(
+              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} (${cols}) VALUES (${placeholders})`,
+              Object.values(row),
+            );
+          }
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+      } finally {
+        client.release();
+      }
+    } else if (cluster.type === ClusterType.MSSQL) {
+      const pool = await this.getMSSQLPool(cluster);
+      const transaction = new mssql.Transaction(pool);
+      await transaction.begin();
+      try {
+        for (const { tableName, rows } of tableEntries) {
+          for (const row of rows) {
+            const req = new mssql.Request(transaction);
+            const cols = Object.keys(row).map((k) => this.escapeIdentifier(k, ClusterType.MSSQL)).join(', ');
+            const placeholders = Object.keys(row).map((k, i) => { req.input(`v${i}`, row[k]); return `@v${i}`; }).join(', ');
+            await req.query(`INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`);
+          }
+        }
+        await transaction.commit();
+      } catch (e) {
+        await transaction.rollback();
+        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+      }
+    } else {
+      const conn = await this.getMySQLPool(cluster).getConnection();
+      try {
+        await conn.beginTransaction();
+        for (const { tableName, rows } of tableEntries) {
+          for (const row of rows) {
+            const keys = Object.keys(row);
+            const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.MYSQL)).join(', ');
+            const placeholders = keys.map(() => '?').join(', ');
+            await conn.query(
+              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MYSQL)} (${cols}) VALUES (${placeholders})`,
+              Object.values(row),
+            );
+          }
+        }
+        await conn.commit();
+      } catch (e) {
+        await conn.rollback();
+        throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`);
+      } finally {
+        conn.release();
       }
     }
+
     return { success: true };
   }
 
@@ -1493,5 +1977,34 @@ export class ClustersService extends UserOwnedService<Cluster> {
       row[h] = values[idx];
     });
     return row;
+  }
+
+  async getAgentStatus(id: string, userId: string) {
+    const cluster = await this.findOne(id, userId);
+    if (!cluster.isLocal) return { isLocal: false, connected: null };
+    return { isLocal: true, connected: this.agentService.isAgentConnected(cluster.agentKey!) };
+  }
+
+  async getAgentKey(id: string, userId: string) {
+    // Bypass class-transformer so agentKey (no @Expose) is accessible
+    const cluster = await this.repository.findOne({ where: { id, userId } });
+    if (!cluster) throw new BadRequestException('Cluster not found');
+    if (!cluster.isLocal) throw new BadRequestException('Cluster is not a local cluster');
+    return { agentKey: cluster.agentKey };
+  }
+
+  async rotateAgentKey(id: string, userId: string) {
+    const cluster = await this.repository.findOne({ where: { id, userId } });
+    if (!cluster) throw new BadRequestException('Cluster not found');
+    if (!cluster.isLocal) throw new BadRequestException('Cluster is not a local cluster');
+
+    // Disconnect any currently connected agent for the old key
+    if (cluster.agentKey) {
+      this.agentService.deregisterByKey(cluster.agentKey);
+    }
+
+    const newKey = randomUUID();
+    await this.repository.update({ id }, { agentKey: newKey });
+    return { agentKey: newKey };
   }
 }
