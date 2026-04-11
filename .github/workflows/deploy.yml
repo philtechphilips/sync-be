@@ -39,7 +39,7 @@ jobs:
             source "$NVM_DIR/nvm.sh"
 
             echo "Restarting app..."
-            pm2 restart synqdb-be --update-efnv
+            pm2 restart synqdb-be --update-env
 
             pm2 save
           EOF
