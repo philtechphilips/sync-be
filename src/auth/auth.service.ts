@@ -18,6 +18,8 @@ import { hashPassword, validatePassword } from '../common/password';
 import { AuthRepo } from './repository/auth.repository';
 import { config } from '../config/config.service';
 import { EmailService } from '../common/services/email.service';
+import { AgentService } from '../agent/agent.service';
+import { randomUUID } from 'crypto';
 
 @Injectable()
 export class AuthService {
@@ -25,6 +27,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly authRepo: AuthRepo,
     private readonly emailService: EmailService,
+    private readonly agentService: AgentService,
   ) {}
 
   async validateUser({ email, password }: LoginAuthDto) {
@@ -75,7 +78,29 @@ export class AuthService {
     }
     const password = await hashPassword(registerDto.password);
     registerDto.password = password;
-    return await this.authRepo.create(registerDto);
+    return await this.authRepo.create({ ...registerDto, agentKey: randomUUID() });
+  }
+
+  async getAgentKey(userId: string): Promise<{ agentKey: string }> {
+    const user = await this.findUserOrThrow(userId);
+    // Backfill key for users created before this feature
+    if (!user.agentKey) {
+      user.agentKey = randomUUID();
+      await this.authRepo.save(user);
+    }
+    return { agentKey: user.agentKey };
+  }
+
+  async rotateAgentKey(userId: string): Promise<{ agentKey: string }> {
+    const user = await this.findUserOrThrow(userId);
+    this.agentService.deregisterByUserId(userId);
+    user.agentKey = randomUUID();
+    await this.authRepo.save(user);
+    return { agentKey: user.agentKey };
+  }
+
+  async getAgentStatus(userId: string): Promise<{ connected: boolean }> {
+    return { connected: this.agentService.isAgentConnected(userId) };
   }
 
   async update(id: string, updateAuthDto: UpdateAuthDto) {
@@ -232,6 +257,7 @@ export class AuthService {
       google_id: googleUserInfo.id,
       requires_password: false,
       role: 'user',
+      agentKey: randomUUID(),
     });
   }
 

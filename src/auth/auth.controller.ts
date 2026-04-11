@@ -207,6 +207,24 @@ export class AuthController {
     }
   }
 
+  @Get('agent-key')
+  @UseGuards(JwtAuthGuard)
+  getAgentKey(@Request() req: any) {
+    return this.authService.getAgentKey(req.user.id);
+  }
+
+  @Post('rotate-agent-key')
+  @UseGuards(JwtAuthGuard)
+  rotateAgentKey(@Request() req: any) {
+    return this.authService.rotateAgentKey(req.user.id);
+  }
+
+  @Get('agent-status')
+  @UseGuards(JwtAuthGuard)
+  getAgentStatus(@Request() req: any) {
+    return this.authService.getAgentStatus(req.user.id);
+  }
+
   @Post('reset-password')
   @Public()
   @UsePipes(ValidationPipe)

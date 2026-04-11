@@ -4,7 +4,6 @@ import { Repository } from 'typeorm';
 import * as mysql from 'mysql2/promise';
 import { Client } from 'pg';
 import * as mssql from 'mssql';
-import { randomUUID } from 'crypto';
 import { Cluster, ClusterType } from './entities/cluster.entity';
 import { QueryLog } from './entities/query-log.entity';
 import { CreateClusterDto } from './dto/create-cluster.dto';
@@ -36,9 +35,8 @@ export class ClustersService extends UserOwnedService<Cluster> {
     params: any[] = [],
     namedParams: Record<string, any> = {},
   ): Promise<{ rows: any[]; rowCount: number }> {
-    // agentKey is guaranteed non-null when isLocal is true
     return this.agentService.routeQuery(
-      { ...cluster, agentKey: cluster.agentKey! },
+      { ...cluster, userId: cluster.userId },
       sql,
       params,
       namedParams,
@@ -218,14 +216,10 @@ export class ClustersService extends UserOwnedService<Cluster> {
 
   async create(userId: string, createClusterDto: CreateClusterDto) {
     const isLocal = createClusterDto.isLocal ?? false;
-    if (!isLocal) {
-      await this.testConnection(createClusterDto);
-    }
-    const agentKey = isLocal ? randomUUID() : null;
+    await this.testConnection(createClusterDto);
     const cluster = this.repository.create({
       ...createClusterDto,
       isLocal,
-      agentKey,
       name: this.cryptographyService.encrypt(createClusterDto.name) as string,
       host: this.cryptographyService.encrypt(createClusterDto.host) as string,
       username: this.cryptographyService.encrypt(
@@ -240,10 +234,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
       userId,
     });
     const saved = await this.repository.save(cluster);
-    const decrypted = this.decryptCluster(saved);
-    // Return agentKey once only for local clusters — it's never exposed via GET
-    if (isLocal) return { ...decrypted, agentKey };
-    return decrypted;
+    return this.decryptCluster(saved);
   }
 
   async findTables(id: string, userId: string) {
@@ -2205,37 +2196,4 @@ export class ClustersService extends UserOwnedService<Cluster> {
     return row;
   }
 
-  async getAgentStatus(id: string, userId: string) {
-    const cluster = await this.findOne(id, userId);
-    if (!cluster.isLocal) return { isLocal: false, connected: null };
-    return {
-      isLocal: true,
-      connected: this.agentService.isAgentConnected(cluster.agentKey!),
-    };
-  }
-
-  async getAgentKey(id: string, userId: string) {
-    // Bypass class-transformer so agentKey (no @Expose) is accessible
-    const cluster = await this.repository.findOne({ where: { id, userId } });
-    if (!cluster) throw new BadRequestException('Cluster not found');
-    if (!cluster.isLocal)
-      throw new BadRequestException('Cluster is not a local cluster');
-    return { agentKey: cluster.agentKey };
-  }
-
-  async rotateAgentKey(id: string, userId: string) {
-    const cluster = await this.repository.findOne({ where: { id, userId } });
-    if (!cluster) throw new BadRequestException('Cluster not found');
-    if (!cluster.isLocal)
-      throw new BadRequestException('Cluster is not a local cluster');
-
-    // Disconnect any currently connected agent for the old key
-    if (cluster.agentKey) {
-      this.agentService.deregisterByKey(cluster.agentKey);
-    }
-
-    const newKey = randomUUID();
-    await this.repository.update({ id }, { agentKey: newKey });
-    return { agentKey: newKey };
-  }
 }

@@ -1,11 +1,11 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { Cluster } from '../clusters/entities/cluster.entity';
+import { User } from '../auth/entities/user.entity';
 import { AgentGateway } from './agent.gateway';
 import { AgentService } from './agent.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Cluster])],
+  imports: [TypeOrmModule.forFeature([User])],
   providers: [AgentGateway, AgentService],
   exports: [AgentService],
 })

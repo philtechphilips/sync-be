@@ -61,6 +61,10 @@ export class User {
   @Column({ type: 'simple-json', nullable: true })
   settings: Record<string, any>;
 
+  // NOT @Expose() — never serialised into REST responses
+  @Column({ type: 'varchar', length: 64, nullable: true, unique: true })
+  agentKey: string | null;
+
   @Expose()
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

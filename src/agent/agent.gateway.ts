@@ -11,7 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Cluster } from '../clusters/entities/cluster.entity';
+import { User } from '../auth/entities/user.entity';
 import { AgentService } from './agent.service';
 
 @WebSocketGateway({
@@ -23,13 +23,13 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
   server: Server;
 
   private readonly logger = new Logger(AgentGateway.name);
-  // socketId → agentKey, for cleanup on disconnect
-  private readonly socketToKey = new Map<string, string>();
+  // socketId → userId, for cleanup on disconnect
+  private readonly socketToUserId = new Map<string, string>();
 
   constructor(
     private readonly agentService: AgentService,
-    @InjectRepository(Cluster)
-    private readonly clusterRepo: Repository<Cluster>,
+    @InjectRepository(User)
+    private readonly userRepo: Repository<User>,
   ) {}
 
   handleConnection(socket: Socket) {
@@ -37,10 +37,10 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   handleDisconnect(socket: Socket) {
-    const agentKey = this.socketToKey.get(socket.id);
-    if (agentKey) {
-      this.agentService.deregisterAgent(agentKey, socket.id);
-      this.socketToKey.delete(socket.id);
+    const userId = this.socketToUserId.get(socket.id);
+    if (userId) {
+      this.agentService.deregisterAgent(userId, socket.id);
+      this.socketToUserId.delete(socket.id);
     }
     this.logger.log(`Agent socket disconnected: ${socket.id}`);
   }
@@ -57,31 +57,27 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
-    const cluster = await this.clusterRepo.findOne({
+    const user = await this.userRepo.findOne({
       where: { agentKey },
-      select: ['id', 'agentKey', 'userId'],
+      select: ['id', 'agentKey'],
     });
 
-    if (!cluster) {
+    if (!user) {
       socket.emit('auth_error', { message: 'Invalid agent key' });
       socket.disconnect(true);
       return;
     }
 
-    this.socketToKey.set(socket.id, agentKey);
-    this.agentService.registerAgent(agentKey, socket);
-    socket.emit('registered', { clusterId: cluster.id });
-    this.logger.log(`Agent authenticated for cluster ${cluster.id}`);
+    this.socketToUserId.set(socket.id, user.id);
+    this.agentService.registerAgent(user.id, socket);
+    socket.emit('registered', { userId: user.id });
+    this.logger.log(`Agent authenticated for user ${user.id}`);
   }
 
   @SubscribeMessage('result')
   handleResult(
     @MessageBody()
-    data: {
-      requestId: string;
-      rows: any[];
-      rowCount: number;
-    },
+    data: { requestId: string; rows: any[]; rowCount: number },
   ) {
     this.agentService.handleResult(data.requestId, data.rows, data.rowCount);
   }

@@ -30,49 +30,48 @@ interface PendingRequest {
 @Injectable()
 export class AgentService {
   private readonly logger = new Logger(AgentService.name);
+  // userId → Socket
   private readonly agentSockets = new Map<string, Socket>();
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly TIMEOUT_MS = 30_000;
 
-  registerAgent(agentKey: string, socket: Socket): void {
-    const existing = this.agentSockets.get(agentKey);
+  registerAgent(userId: string, socket: Socket): void {
+    const existing = this.agentSockets.get(userId);
     if (existing && existing.id !== socket.id) {
       existing.disconnect(true);
     }
-    this.agentSockets.set(agentKey, socket);
-    this.logger.log(`Agent registered: key=${agentKey} socket=${socket.id}`);
+    this.agentSockets.set(userId, socket);
+    this.logger.log(`Agent registered: userId=${userId} socket=${socket.id}`);
   }
 
-  deregisterAgent(agentKey: string, socketId: string): void {
-    const sock = this.agentSockets.get(agentKey);
+  deregisterAgent(userId: string, socketId: string): void {
+    const sock = this.agentSockets.get(userId);
     if (sock?.id === socketId) {
-      this.agentSockets.delete(agentKey);
-      this.logger.log(`Agent deregistered: key=${agentKey}`);
+      this.agentSockets.delete(userId);
+      this.logger.log(`Agent deregistered: userId=${userId}`);
     }
   }
 
-  deregisterByKey(agentKey: string): void {
-    const sock = this.agentSockets.get(agentKey);
+  deregisterByUserId(userId: string): void {
+    const sock = this.agentSockets.get(userId);
     if (sock) {
       sock.emit('auth_error', {
         message: 'Agent key has been rotated. Please restart with the new key.',
       });
       sock.disconnect(true);
-      this.agentSockets.delete(agentKey);
-      this.logger.log(
-        `Agent force-disconnected on key rotation: key=${agentKey}`,
-      );
+      this.agentSockets.delete(userId);
+      this.logger.log(`Agent force-disconnected on key rotation: userId=${userId}`);
     }
   }
 
-  isAgentConnected(agentKey: string): boolean {
-    const sock = this.agentSockets.get(agentKey);
+  isAgentConnected(userId: string): boolean {
+    const sock = this.agentSockets.get(userId);
     return !!(sock && sock.connected);
   }
 
   async routeQuery(
     cluster: {
-      agentKey: string;
+      userId: string;
       type: ClusterType;
       host: string;
       port: number;
@@ -84,7 +83,7 @@ export class AgentService {
     params: any[] = [],
     namedParams: Record<string, any> = {},
   ): Promise<{ rows: any[]; rowCount: number }> {
-    const socket = this.agentSockets.get(cluster.agentKey);
+    const socket = this.agentSockets.get(cluster.userId);
     if (!socket || !socket.connected) {
       throw new ServiceUnavailableException(
         'Local agent is not connected. Please start the agent CLI on your machine.',

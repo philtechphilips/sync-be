@@ -10,6 +10,7 @@ import { LocalStrategy } from './strategies/local.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { EmailService } from '../common/services/email.service';
 import { config } from '../config/config.service';
+import { AgentModule } from '../agent/agent.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { config } from '../config/config.service';
       secret: config.JWT.SECRET,
       signOptions: { expiresIn: config.JWT.ACCESS_EXPIRATION },
     }),
+    AgentModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, AuthRepo, LocalStrategy, JwtStrategy, EmailService],
