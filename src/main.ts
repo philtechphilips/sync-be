@@ -38,7 +38,7 @@ async function bootstrap() {
     '/v1/ai',
     rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 30,
+      max: 300,
       standardHeaders: true,
       legacyHeaders: false,
       message:
@@ -51,7 +51,7 @@ async function bootstrap() {
     '/v1/auth',
     rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 20,
+      max: 200,
       standardHeaders: true,
       legacyHeaders: false,
       message: 'Too many authentication attempts. Please try again later.',
