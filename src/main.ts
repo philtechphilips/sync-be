@@ -22,18 +22,18 @@ async function bootstrap() {
     credentials: true,
   });
 
-  // General rate limit — 300 requests per 15 minutes per IP
+  // General rate limit
   app.use(
     rateLimit({
       windowMs: 15 * 60 * 1000,
-      max: 300,
+      max: 3000,
       standardHeaders: true,
       legacyHeaders: false,
       message: 'Too many requests from this IP, please try again later.',
     }),
   );
 
-  // Stricter limit for AI SQL generation — 30 requests per 15 minutes per IP
+  // Limit for AI SQL generation
   app.use(
     '/v1/ai',
     rateLimit({
@@ -46,7 +46,7 @@ async function bootstrap() {
     }),
   );
 
-  // Stricter limit for auth endpoints — 20 attempts per 15 minutes per IP
+  // Limit for auth endpoints
   app.use(
     '/v1/auth',
     rateLimit({
