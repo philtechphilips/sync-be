@@ -87,13 +87,15 @@ STRICT PostgreSQL RULES — never violate these:
     }
   }
 
-  async explainSQL(sql: string, mode: 'simple' | 'advanced') {
+  async explainSQL(clusterId: string, userId: string, sql: string, mode: 'simple' | 'advanced') {
+    const cluster = await this.clustersService.findOne(clusterId, userId);
+
     const response = await this.openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         {
           role: 'system',
-          content: `You are a database consultant. Explain the provided SQL query in ${mode} terms. ${mode === 'simple' ? 'Avoid technical jargon.' : 'Include technical details like joins and aggregation logic.'}`,
+          content: `You are a database consultant for ${cluster.type === ClusterType.MSSQL ? 'SQL Server (T-SQL)' : cluster.type}. Explain the provided SQL query in ${mode} terms. ${mode === 'simple' ? 'Avoid technical jargon.' : 'Include technical details like joins and aggregation logic.'}`,
         },
         {
           role: 'user',

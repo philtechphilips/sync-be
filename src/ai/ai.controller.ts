@@ -56,10 +56,19 @@ export class AIController {
     };
   }
 
-  @Post('/explain')
-  async explain(@Body() body: { sql: string; mode: 'simple' | 'advanced' }) {
+  @Post('/:clusterId/explain')
+  async explain(
+    @Request() req: any,
+    @Param('clusterId') clusterId: string,
+    @Body() body: { sql: string; mode: 'simple' | 'advanced' },
+  ) {
     return {
-      explanation: await this.aiService.explainSQL(body.sql, body.mode),
+      explanation: await this.aiService.explainSQL(
+        clusterId,
+        req.user.id,
+        body.sql,
+        body.mode,
+      ),
     };
   }
 
