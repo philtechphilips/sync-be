@@ -87,7 +87,12 @@ STRICT PostgreSQL RULES — never violate these:
     }
   }
 
-  async explainSQL(clusterId: string, userId: string, sql: string, mode: 'simple' | 'advanced') {
+  async explainSQL(
+    clusterId: string,
+    userId: string,
+    sql: string,
+    mode: 'simple' | 'advanced',
+  ) {
     const cluster = await this.clustersService.findOne(clusterId, userId);
 
     const response = await this.openai.chat.completions.create({
