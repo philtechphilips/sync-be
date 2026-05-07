@@ -1294,6 +1294,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
     let execQuery = query;
     if (usePagination) {
       const offset = (page - 1) * limit;
+      if (!Number.isInteger(offset) || !Number.isInteger(limit) || offset < 0 || limit < 0) {
+        throw new Error('Invalid input');
+      }
       if (cluster.type === ClusterType.MSSQL) {
         execQuery = `SELECT * FROM (${baseQuery}) AS __synq_sub ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
       } else {
@@ -1303,6 +1306,7 @@ export class ClustersService extends UserOwnedService<Cluster> {
 
     return { execQuery, usePagination, baseQuery };
   }
+</original_code>
 
   private async runDatabaseQuery(
     cluster: Cluster,
