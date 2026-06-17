@@ -254,7 +254,10 @@ export class AuthController {
     @Body('loginToken') loginToken: string,
   ) {
     try {
-      return await this.authService.authorizeCliLoginToken(req.user.id, loginToken);
+      return await this.authService.authorizeCliLoginToken(
+        req.user.id,
+        loginToken,
+      );
     } catch (error) {
       throw new HttpException(
         { success: false, message: error.message },

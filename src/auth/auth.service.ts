@@ -448,7 +448,10 @@ export class AuthService {
     return { success: true };
   }
 
-  pollCliLoginToken(loginToken: string): { status: 'pending' | 'authorized'; agentKey?: string } {
+  pollCliLoginToken(loginToken: string): {
+    status: 'pending' | 'authorized';
+    agentKey?: string;
+  } {
     const entry = this.cliLoginTokens.get(loginToken);
     if (!entry || entry.expiresAt < Date.now()) {
       throw new BadRequestException('Login token is invalid or has expired.');
