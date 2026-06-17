@@ -85,7 +85,12 @@ Manages the user's personal SQL library.
 ### Auth Module
 **Location**: `src/auth/`
 Handles identity management and access control.
-*   **Features**: JWT-based session management, Refresh token rotations, and Social login via Google.
+*   **Features**: JWT-based session management, Refresh token rotations, Social login via Google, and browser-based CLI authentication (device-flow style — no keys copied in the terminal).
+
+### Agent Module
+**Location**: `src/agent/`
+Manages the local agent relay over WebSocket.
+*   **Features**: Per-user agent registration, live query routing to the connected agent, and key rotation with automatic disconnection.
 
 ---
 
@@ -162,6 +167,44 @@ OPENAI_API_KEY=sk-...
 # FRONTEND
 FRONTEND_URL=http://localhost:3000
 ```
+
+---
+
+## 📡 API Endpoints
+
+### Auth — `/v1/auth`
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/login` | Public | Email/password login |
+| `POST` | `/register` | Public | Create account |
+| `POST` | `/refresh` | Public | Refresh access token |
+| `POST` | `/forgot-password` | Public | Send password reset email |
+| `POST` | `/reset-password` | Public | Reset password with token |
+| `GET` | `/oauth/google` | Public | Initiate Google OAuth |
+| `GET` | `/oauth/google/callback` | Public | Google OAuth callback |
+| `GET` | `/status` | JWT | Get current user |
+| `PATCH` | `/` | JWT | Update user fields |
+| `PATCH` | `/profile` | JWT | Update name / avatar / settings |
+| `PATCH` | `/password` | JWT | Change password |
+| `GET` | `/agent-key` | JWT | Get agent key (backfills if missing) |
+| `POST` | `/rotate-agent-key` | JWT | Rotate agent key, disconnect running agent |
+| `GET` | `/agent-status` | JWT | Check if agent is connected |
+| `POST` | `/cli-login/init` | Public | Start browser-based CLI auth — returns a short-lived `loginToken` |
+| `GET` | `/cli-login/poll/:token` | Public | Poll until user approves — returns `{status, agentKey}` |
+| `POST` | `/cli-login/authorize` | JWT | Called by the web app to approve a CLI login token |
+
+### Clusters — `/v1/clusters`
+
+Endpoints for creating/listing clusters, executing queries, exploring schemas, and managing query logs.
+
+### AI — `/v1/ai`
+
+Endpoints for natural language SQL generation and query explanation (rate-limited to 300 req / 15 min).
+
+### Query Management — `/v1/queries`, `/v1/collections`
+
+Endpoints for saving, organizing, and retrieving named SQL queries and collections.
 
 ---
 

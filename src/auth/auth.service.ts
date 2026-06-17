@@ -21,8 +21,17 @@ import { EmailService } from '../common/services/email.service';
 import { AgentService } from '../agent/agent.service';
 import { randomUUID } from 'crypto';
 
+interface CliLoginToken {
+  userId: string | null;
+  agentKey: string | null;
+  expiresAt: number;
+}
+
 @Injectable()
 export class AuthService {
+  // Short-lived in-memory store for browser-based CLI auth tokens
+  private readonly cliLoginTokens = new Map<string, CliLoginToken>();
+
   constructor(
     private readonly jwtService: JwtService,
     private readonly authRepo: AuthRepo,
@@ -401,6 +410,54 @@ export class AuthService {
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
+  }
+
+  // ─── Browser-based CLI auth ───────────────────────────────────────────────
+
+  createCliLoginToken(): { loginToken: string } {
+    // Prune expired tokens
+    const now = Date.now();
+    for (const [k, v] of this.cliLoginTokens) {
+      if (v.expiresAt < now) this.cliLoginTokens.delete(k);
+    }
+
+    const loginToken = randomUUID();
+    this.cliLoginTokens.set(loginToken, {
+      userId: null,
+      agentKey: null,
+      expiresAt: now + 5 * 60 * 1000, // 5 minutes
+    });
+    return { loginToken };
+  }
+
+  async authorizeCliLoginToken(
+    userId: string,
+    loginToken: string,
+  ): Promise<{ success: boolean }> {
+    const entry = this.cliLoginTokens.get(loginToken);
+    if (!entry || entry.expiresAt < Date.now()) {
+      throw new BadRequestException('Login token is invalid or has expired.');
+    }
+    if (entry.userId !== null) {
+      throw new BadRequestException('Login token has already been used.');
+    }
+
+    const { agentKey } = await this.getAgentKey(userId);
+    entry.userId = userId;
+    entry.agentKey = agentKey;
+    return { success: true };
+  }
+
+  pollCliLoginToken(loginToken: string): { status: 'pending' | 'authorized'; agentKey?: string } {
+    const entry = this.cliLoginTokens.get(loginToken);
+    if (!entry || entry.expiresAt < Date.now()) {
+      throw new BadRequestException('Login token is invalid or has expired.');
+    }
+    if (entry.agentKey) {
+      this.cliLoginTokens.delete(loginToken);
+      return { status: 'authorized', agentKey: entry.agentKey };
+    }
+    return { status: 'pending' };
   }
 
   private async findUserOrThrow(id: string) {

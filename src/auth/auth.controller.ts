@@ -4,6 +4,7 @@ import {
   Post,
   Body,
   Patch,
+  Param,
   UseGuards,
   UsePipes,
   ValidationPipe,
@@ -223,6 +224,43 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   getAgentStatus(@Request() req: any) {
     return this.authService.getAgentStatus(req.user.id);
+  }
+
+  // ─── Browser-based CLI auth ─────────────────────────────────────────────
+
+  @Post('cli-login/init')
+  @Public()
+  initCliLogin() {
+    return this.authService.createCliLoginToken();
+  }
+
+  @Get('cli-login/poll/:token')
+  @Public()
+  pollCliLogin(@Param('token') token: string) {
+    try {
+      return this.authService.pollCliLoginToken(token);
+    } catch (error) {
+      throw new HttpException(
+        { success: false, message: error.message },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+  }
+
+  @Post('cli-login/authorize')
+  @UseGuards(JwtAuthGuard)
+  async authorizeCliLogin(
+    @Request() req: any,
+    @Body('loginToken') loginToken: string,
+  ) {
+    try {
+      return await this.authService.authorizeCliLoginToken(req.user.id, loginToken);
+    } catch (error) {
+      throw new HttpException(
+        { success: false, message: error.message },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
   }
 
   @Post('reset-password')
