@@ -126,7 +126,10 @@ export class ClustersService extends UserOwnedService<Cluster> {
   }
 
   // Run a synchronous better-sqlite3 call in a Promise so it fits the async service pattern
-  private runSQLite<T>(cluster: Cluster, fn: (db: Database.Database) => T): Promise<T> {
+  private runSQLite<T>(
+    cluster: Cluster,
+    fn: (db: Database.Database) => T,
+  ): Promise<T> {
     return new Promise((resolve, reject) => {
       try {
         resolve(fn(this.getSQLiteDb(cluster)));
@@ -326,9 +329,11 @@ export class ClustersService extends UserOwnedService<Cluster> {
       return result.recordset;
     } else if (type === ClusterType.SQLITE) {
       return this.runSQLite(cluster, (db) => {
-        const rows = db.prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC",
-        ).all() as { name: string }[];
+        const rows = db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC",
+          )
+          .all() as { name: string }[];
         return rows.map((r) => ({ name: r.name }));
       });
     }
@@ -385,9 +390,11 @@ export class ClustersService extends UserOwnedService<Cluster> {
         throw new BadRequestException(`Table '${tableName}' not found!`);
     } else if (type === ClusterType.SQLITE) {
       const exists = await this.runSQLite(cluster, (db) => {
-        const row = db.prepare(
-          "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-        ).get(tableName);
+        const row = db
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+          )
+          .get(tableName);
         return !!row;
       });
       if (!exists)
@@ -463,7 +470,11 @@ export class ClustersService extends UserOwnedService<Cluster> {
       return res.rows;
     } else if (type === ClusterType.SQLITE) {
       return this.runSQLite(cluster, (db) => {
-        const rows = db.prepare(`PRAGMA table_info(${this.escapeIdentifier(tableName, ClusterType.SQLITE)})`).all() as any[];
+        const rows = db
+          .prepare(
+            `PRAGMA table_info(${this.escapeIdentifier(tableName, ClusterType.SQLITE)})`,
+          )
+          .all() as any[];
         return rows.map((r) => ({
           name: r.name,
           type: r.type,
@@ -541,12 +552,18 @@ export class ClustersService extends UserOwnedService<Cluster> {
       return res.rows;
     } else if (type === ClusterType.SQLITE) {
       return this.runSQLite(cluster, (db) => {
-        const tables = db.prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC",
-        ).all() as { name: string }[];
+        const tables = db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC",
+          )
+          .all() as { name: string }[];
         const schema: any[] = [];
         for (const table of tables) {
-          const cols = db.prepare(`PRAGMA table_info(${this.escapeIdentifier(table.name, ClusterType.SQLITE)})`).all() as any[];
+          const cols = db
+            .prepare(
+              `PRAGMA table_info(${this.escapeIdentifier(table.name, ClusterType.SQLITE)})`,
+            )
+            .all() as any[];
           for (const c of cols) {
             schema.push({
               tableName: table.name,
@@ -697,7 +714,14 @@ export class ClustersService extends UserOwnedService<Cluster> {
           offset,
         );
       case ClusterType.SQLITE:
-        return this.runFindSQLite(cluster, escapedTableName, filters, page, limit, offset);
+        return this.runFindSQLite(
+          cluster,
+          escapedTableName,
+          filters,
+          page,
+          limit,
+          offset,
+        );
       default:
         throw new Error(`Unsupported cluster type: ${cluster.type}`);
     }
@@ -814,14 +838,19 @@ export class ClustersService extends UserOwnedService<Cluster> {
     limit: number,
     offset: number,
   ) {
-    const { where, params } = this.buildWhereClause(ClusterType.SQLITE, filters);
+    const { where, params } = this.buildWhereClause(
+      ClusterType.SQLITE,
+      filters,
+    );
     return this.runSQLite(cluster, (db) => {
-      const rows = db.prepare(
-        `SELECT * FROM ${escapedTableName}${where} LIMIT ? OFFSET ?`,
-      ).all([...params, limit, offset]);
-      const total = (db.prepare(
-        `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`,
-      ).get(params) as any).total;
+      const rows = db
+        .prepare(`SELECT * FROM ${escapedTableName}${where} LIMIT ? OFFSET ?`)
+        .all([...params, limit, offset]);
+      const total = (
+        db
+          .prepare(`SELECT COUNT(*) as total FROM ${escapedTableName}${where}`)
+          .get(params) as any
+      ).total;
       return { data: rows, total, page, limit };
     });
   }
@@ -1030,9 +1059,15 @@ export class ClustersService extends UserOwnedService<Cluster> {
         return this.runUpdateMSSQL(cluster, escapedTableName, data, where);
       case ClusterType.SQLITE:
         return this.runSQLite(cluster, (db) => {
-          const set = Object.keys(data).map((k) => `${this.escapeIdentifier(k, ClusterType.SQLITE)} = ?`).join(', ');
-          const cond = Object.keys(where).map((k) => `${this.escapeIdentifier(k, ClusterType.SQLITE)} = ?`).join(' AND ');
-          const result = db.prepare(`UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`).run([...Object.values(data), ...Object.values(where)]);
+          const set = Object.keys(data)
+            .map((k) => `${this.escapeIdentifier(k, ClusterType.SQLITE)} = ?`)
+            .join(', ');
+          const cond = Object.keys(where)
+            .map((k) => `${this.escapeIdentifier(k, ClusterType.SQLITE)} = ?`)
+            .join(' AND ');
+          const result = db
+            .prepare(`UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`)
+            .run([...Object.values(data), ...Object.values(where)]);
           return result.changes;
         });
       default:
@@ -1167,9 +1202,15 @@ export class ClustersService extends UserOwnedService<Cluster> {
       case ClusterType.SQLITE:
         return this.runSQLite(cluster, (db) => {
           const keys = Object.keys(data);
-          const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.SQLITE)).join(', ');
+          const cols = keys
+            .map((k) => this.escapeIdentifier(k, ClusterType.SQLITE))
+            .join(', ');
           const placeholders = keys.map(() => '?').join(', ');
-          const result = db.prepare(`INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`).run(Object.values(data));
+          const result = db
+            .prepare(
+              `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`,
+            )
+            .run(Object.values(data));
           return { id: result.lastInsertRowid, ...data };
         });
       default:
@@ -1292,8 +1333,12 @@ export class ClustersService extends UserOwnedService<Cluster> {
         return this.runDeleteMSSQL(cluster, escapedTableName, where);
       case ClusterType.SQLITE:
         return this.runSQLite(cluster, (db) => {
-          const cond = Object.keys(where).map((k) => `${this.escapeIdentifier(k, ClusterType.SQLITE)} = ?`).join(' AND ');
-          const result = db.prepare(`DELETE FROM ${escapedTableName} WHERE ${cond}`).run(Object.values(where));
+          const cond = Object.keys(where)
+            .map((k) => `${this.escapeIdentifier(k, ClusterType.SQLITE)} = ?`)
+            .join(' AND ');
+          const result = db
+            .prepare(`DELETE FROM ${escapedTableName} WHERE ${cond}`)
+            .run(Object.values(where));
           return result.changes;
         });
       default:
@@ -1422,7 +1467,12 @@ export class ClustersService extends UserOwnedService<Cluster> {
     let execQuery = query;
     if (usePagination) {
       const offset = (page - 1) * limit;
-      if (!Number.isInteger(offset) || !Number.isInteger(limit) || offset < 0 || limit < 0) {
+      if (
+        !Number.isInteger(offset) ||
+        !Number.isInteger(limit) ||
+        offset < 0 ||
+        limit < 0
+      ) {
         throw new Error('Invalid input');
       }
       if (cluster.type === ClusterType.MSSQL) {
@@ -1469,7 +1519,12 @@ export class ClustersService extends UserOwnedService<Cluster> {
       case ClusterType.MSSQL:
         return this.runMSSQL(cluster, execQuery, usePagination, baseQuery);
       case ClusterType.SQLITE:
-        return this.runSQLiteQuery(cluster, execQuery, usePagination, baseQuery);
+        return this.runSQLiteQuery(
+          cluster,
+          execQuery,
+          usePagination,
+          baseQuery,
+        );
       default:
         throw new Error(`Unsupported cluster type: ${cluster.type}`);
     }
@@ -1487,7 +1542,11 @@ export class ClustersService extends UserOwnedService<Cluster> {
       let totals: number[];
       if (usePagination) {
         const safeBase = baseQuery.trim().replace(/;$/, '');
-        const countRow = db.prepare(`SELECT COUNT(*) as total FROM (${safeBase}) AS __synq_count`).get() as any;
+        const countRow = db
+          .prepare(
+            `SELECT COUNT(*) as total FROM (${safeBase}) AS __synq_count`,
+          )
+          .get() as any;
         totals = [Number(countRow?.total ?? 0)];
       } else {
         totals = results.map((r) => (Array.isArray(r) ? r.length : 0));
@@ -1603,7 +1662,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
     } else if (cluster.type === ClusterType.SQLITE) {
       try {
         await this.runSQLite(cluster, (db) => {
-          db.prepare(`DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.SQLITE)}`).run();
+          db.prepare(
+            `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.SQLITE)}`,
+          ).run();
         });
         return { success: true };
       } catch (error: any) {
@@ -2240,13 +2301,23 @@ export class ClustersService extends UserOwnedService<Cluster> {
           for (const tableName of Object.keys(data)) {
             for (const row of data[tableName] as any[]) {
               const keys = Object.keys(row);
-              const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.SQLITE)).join(', ');
+              const cols = keys
+                .map((k) => this.escapeIdentifier(k, ClusterType.SQLITE))
+                .join(', ');
               const placeholders = keys.map(() => '?').join(', ');
-              db.prepare(`INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.SQLITE)} (${cols}) VALUES (${placeholders})`).run(Object.values(row));
+              db.prepare(
+                `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.SQLITE)} (${cols}) VALUES (${placeholders})`,
+              ).run(Object.values(row));
             }
           }
         });
-        try { tx(); } catch (e: any) { throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`); }
+        try {
+          tx();
+        } catch (e: any) {
+          throw new BadRequestException(
+            `Restore failed and was rolled back: ${e.message}`,
+          );
+        }
       });
     } else {
       const conn = await this.getMySQLPool(cluster).getConnection();
@@ -2354,13 +2425,23 @@ export class ClustersService extends UserOwnedService<Cluster> {
           for (const { tableName, rows } of tableEntries) {
             for (const row of rows) {
               const keys = Object.keys(row);
-              const cols = keys.map((k) => this.escapeIdentifier(k, ClusterType.SQLITE)).join(', ');
+              const cols = keys
+                .map((k) => this.escapeIdentifier(k, ClusterType.SQLITE))
+                .join(', ');
               const placeholders = keys.map(() => '?').join(', ');
-              db.prepare(`INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.SQLITE)} (${cols}) VALUES (${placeholders})`).run(Object.values(row));
+              db.prepare(
+                `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.SQLITE)} (${cols}) VALUES (${placeholders})`,
+              ).run(Object.values(row));
             }
           }
         });
-        try { tx(); } catch (e: any) { throw new BadRequestException(`Restore failed and was rolled back: ${e.message}`); }
+        try {
+          tx();
+        } catch (e: any) {
+          throw new BadRequestException(
+            `Restore failed and was rolled back: ${e.message}`,
+          );
+        }
       });
     } else {
       const conn = await this.getMySQLPool(cluster).getConnection();
