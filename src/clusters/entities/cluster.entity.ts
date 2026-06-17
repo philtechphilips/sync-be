@@ -6,6 +6,7 @@ export enum ClusterType {
   MYSQL = 'mysql',
   POSTGRES = 'postgres',
   MSSQL = 'mssql',
+  SQLITE = 'sqlite',
 }
 
 export enum ClusterEnvironment {
