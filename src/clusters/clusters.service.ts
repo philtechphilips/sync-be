@@ -279,12 +279,24 @@ export class ClustersService extends UserOwnedService<Cluster> {
     return this.decryptCluster(saved);
   }
 
-  async updateCluster(id: string, userId: string, updates: Partial<CreateClusterDto>) {
+  async updateCluster(
+    id: string,
+    userId: string,
+    updates: Partial<CreateClusterDto>,
+  ) {
     const cluster = await this.findOne(id, userId);
-    const encryptable = ['name', 'host', 'username', 'password', 'database'] as const;
+    const encryptable = [
+      'name',
+      'host',
+      'username',
+      'password',
+      'database',
+    ] as const;
     for (const field of encryptable) {
       if (updates[field] !== undefined && updates[field] !== '') {
-        (updates as any)[field] = this.cryptographyService.encrypt(updates[field] as string);
+        (updates as any)[field] = this.cryptographyService.encrypt(
+          updates[field] as string,
+        );
       }
     }
     Object.assign(cluster, updates);
