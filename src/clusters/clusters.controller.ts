@@ -37,6 +37,15 @@ export class ClustersController extends UserOwnedController<Cluster> {
     return this.clustersService.testConnection(createClusterDto);
   }
 
+  @Patch(':id')
+  async update(
+    @Request() req: any,
+    @Param('id') id: string,
+    @Body() body: Partial<CreateClusterDto>,
+  ) {
+    return this.clustersService.updateCluster(id, req.user.id, body);
+  }
+
   @Get(':id/tables')
   async findTables(@Request() req: any, @Param('id') id: string) {
     return this.clustersService.findTables(id, req.user.id);

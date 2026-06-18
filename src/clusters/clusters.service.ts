@@ -256,7 +256,9 @@ export class ClustersService extends UserOwnedService<Cluster> {
 
   async create(userId: string, createClusterDto: CreateClusterDto) {
     const isLocal = createClusterDto.isLocal ?? false;
-    await this.testConnection(createClusterDto);
+    if (!isLocal) {
+      await this.testConnection(createClusterDto);
+    }
     const cluster = this.repository.create({
       ...createClusterDto,
       isLocal,
@@ -273,6 +275,19 @@ export class ClustersService extends UserOwnedService<Cluster> {
       ) as string,
       userId,
     });
+    const saved = await this.repository.save(cluster);
+    return this.decryptCluster(saved);
+  }
+
+  async updateCluster(id: string, userId: string, updates: Partial<CreateClusterDto>) {
+    const cluster = await this.findOne(id, userId);
+    const encryptable = ['name', 'host', 'username', 'password', 'database'] as const;
+    for (const field of encryptable) {
+      if (updates[field] !== undefined && updates[field] !== '') {
+        (updates as any)[field] = this.cryptographyService.encrypt(updates[field] as string);
+      }
+    }
+    Object.assign(cluster, updates);
     const saved = await this.repository.save(cluster);
     return this.decryptCluster(saved);
   }
