@@ -21,7 +21,7 @@ export class User {
   full_name: string;
 
   @Expose()
-  @Column()
+  @Column({ unique: true })
   email: string;
 
   @Expose()
@@ -36,17 +36,12 @@ export class User {
   @Column({ default: true })
   requires_password: boolean;
 
-  @Column({ nullable: true })
-  password: string;
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  password: string | null;
 
-  @Column({ type: 'text', nullable: true })
-  access_token: string;
-
-  @Column({ type: 'text', nullable: true })
-  refresh_token: string;
-
-  @Column({ type: 'timestamp', nullable: true })
-  refresh_token_expiry: Date;
+  /** Set once the user proves they own the address (Google or reset link). */
+  @Column({ default: false })
+  email_verified: boolean;
 
   @Column({ nullable: true, default: 'local' })
   provider: string;

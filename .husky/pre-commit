@@ -18,12 +18,12 @@ npm run check-format ||
     exit 1;
 }
 
-# echo '🔍 Checking ESLint standards...'
-# npm run check-lint ||
-# {
-#     echo '❌ ESLint errors found, please review and fix';
-#     exit 1; 
-# }
+echo '🔍 Checking ESLint standards...'
+npm run check-lint ||
+{
+    echo '❌ ESLint errors found, please review and fix';
+    exit 1;
+}
 
 echo '📘 Checking TypeScript types...'
 npm run check-types ||

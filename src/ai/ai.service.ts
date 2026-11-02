@@ -1,19 +1,29 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import OpenAI from 'openai';
 import { ClustersService } from '../clusters/clusters.service';
 import { ClusterType } from '../clusters/entities/cluster.entity';
+import { config } from '../config/config.service';
+
+// Keeps prompts inside the model's context window for very large schemas.
+const MAX_SCHEMA_CHARS = 60_000;
 
 @Injectable()
 export class AIService {
-  private readonly openai: OpenAI;
+  private client: OpenAI | null = null;
 
-  constructor(private readonly clustersService: ClustersService) {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+  constructor(private readonly clustersService: ClustersService) {}
+
+  private get openai(): OpenAI {
+    if (!config.OPENAI_API_KEY) {
+      throw new ServiceUnavailableException(
+        'AI features are not configured on this server.',
+      );
+    }
+    this.client ??= new OpenAI({ apiKey: config.OPENAI_API_KEY });
+    return this.client;
   }
 
-  private getSQLSystemPrompt(clusterType: string): string {
+  private getSQLSystemPrompt(clusterType: ClusterType): string {
     if (clusterType === ClusterType.MSSQL) {
       return `You are a professional T-SQL (Microsoft SQL Server) expert. Generate valid T-SQL code based on the provided schema. Only return raw SQL — no explanations, no markdown, no code fences.
 STRICT T-SQL RULES — never violate these:
@@ -59,25 +69,33 @@ STRICT PostgreSQL RULES — never violate these:
       .replaceAll(/```sql|```/g, '');
   }
 
-  async *generateSQLStream(clusterId: string, userId: string, prompt: string) {
+  async *generateSQLStream(
+    clusterId: string,
+    userId: string,
+    prompt: string,
+    signal?: AbortSignal,
+  ) {
     const cluster = await this.clustersService.findOne(clusterId, userId);
     const rawSchema = await this.clustersService.getSchema(clusterId, userId);
     const compactSchema = this.getCompressedSchema(rawSchema);
 
-    const stream = await this.openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: this.getSQLSystemPrompt(cluster.type),
-        },
-        {
-          role: 'user',
-          content: `Schema: ${compactSchema}\n\nObjective: "${prompt}"`,
-        },
-      ],
-      stream: true,
-    });
+    const stream = await this.openai.chat.completions.create(
+      {
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: this.getSQLSystemPrompt(cluster.type),
+          },
+          {
+            role: 'user',
+            content: `Schema: ${compactSchema}\n\nObjective: "${prompt}"`,
+          },
+        ],
+        stream: true,
+      },
+      { signal },
+    );
 
     for await (const chunk of stream) {
       const content = chunk.choices[0]?.delta?.content || '';
@@ -138,7 +156,7 @@ STRICT PostgreSQL RULES — never violate these:
    * Compresses the flat schema list into a token-efficient text format.
    * Maps tableName to a concise list of columns and their types.
    */
-  private getCompressedSchema(rawSchema: any[]): string {
+  private getCompressedSchema(rawSchema: Array<Record<string, any>>): string {
     const tables: Record<string, string[]> = {};
     const fks: string[] = [];
 
@@ -154,12 +172,12 @@ STRICT PostgreSQL RULES — never violate these:
       }
     });
 
-    console.log(rawSchema);
-
-    return (
+    const text =
       Object.entries(tables)
         .map(([name, cols]) => `Table ${name} [${cols.join(', ')}]`)
-        .join('; ') + (fks.length > 0 ? ` | Relations: ${fks.join(', ')}` : '')
-    );
+        .join('; ') + (fks.length > 0 ? ` | Relations: ${fks.join(', ')}` : '');
+    return text.length > MAX_SCHEMA_CHARS
+      ? `${text.slice(0, MAX_SCHEMA_CHARS)} … (schema truncated)`
+      : text;
   }
 }

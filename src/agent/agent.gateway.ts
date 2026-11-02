@@ -12,19 +12,24 @@ import { Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
-import { AgentService } from './agent.service';
+import { AgentService, sanitizeConnections } from './agent.service';
+import { config } from '../config/config.service';
+
+const REGISTER_TIMEOUT_MS = 15_000;
 
 @WebSocketGateway({
   namespace: '/agent',
-  cors: { origin: '*' },
+  cors: { origin: [config.FRONTEND_URL] },
+  // Query results can be large; Socket.IO's default limit is 1 MB.
+  maxHttpBufferSize: 100 * 1024 * 1024,
 })
 export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
   private readonly logger = new Logger(AgentGateway.name);
-  // socketId → userId, for cleanup on disconnect
   private readonly socketToUserId = new Map<string, string>();
+  private readonly registerTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly agentService: AgentService,
@@ -33,24 +38,28 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {}
 
   handleConnection(socket: Socket) {
-    this.logger.log(`Agent socket connected: ${socket.id}`);
+    // Sockets that never authenticate are dropped.
+    const timer = setTimeout(() => {
+      if (!this.socketToUserId.has(socket.id)) socket.disconnect(true);
+    }, REGISTER_TIMEOUT_MS);
+    this.registerTimers.set(socket.id, timer);
   }
 
   handleDisconnect(socket: Socket) {
+    clearTimeout(this.registerTimers.get(socket.id));
+    this.registerTimers.delete(socket.id);
     const userId = this.socketToUserId.get(socket.id);
-    if (userId) {
-      this.agentService.deregisterAgent(userId, socket.id);
-      this.socketToUserId.delete(socket.id);
-    }
-    this.logger.log(`Agent socket disconnected: ${socket.id}`);
+    this.socketToUserId.delete(socket.id);
+    void this.agentService.socketClosed(socket.id, userId);
   }
 
   @SubscribeMessage('register')
   async handleRegister(
     @ConnectedSocket() socket: Socket,
-    @MessageBody() data: { agentKey: string },
+    @MessageBody()
+    data: { agentKey?: string; version?: string; connections?: unknown },
   ) {
-    const { agentKey } = data ?? {};
+    const agentKey = typeof data?.agentKey === 'string' ? data.agentKey : '';
     if (!agentKey) {
       socket.emit('auth_error', { message: 'agentKey is required' });
       socket.disconnect(true);
@@ -59,35 +68,52 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     const user = await this.userRepo.findOne({
       where: { agentKey },
-      select: ['id', 'agentKey'],
+      select: ['id'],
     });
-
     if (!user) {
       socket.emit('auth_error', { message: 'Invalid agent key' });
       socket.disconnect(true);
       return;
     }
 
+    clearTimeout(this.registerTimers.get(socket.id));
+    this.registerTimers.delete(socket.id);
     this.socketToUserId.set(socket.id, user.id);
-    this.agentService.registerAgent(user.id, socket);
+    const version =
+      typeof data?.version === 'string' ? data.version.slice(0, 20) : null;
+    await this.agentService.registerAgent(
+      user.id,
+      socket,
+      version,
+      sanitizeConnections(data?.connections),
+    );
     socket.emit('registered', { userId: user.id });
-    this.logger.log(`Agent authenticated for user ${user.id}`);
+  }
+
+  /** Sent by the agent when its saved connections change. */
+  @SubscribeMessage('connections')
+  handleConnections(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() data: any,
+  ) {
+    const userId = this.socketToUserId.get(socket.id);
+    if (!userId) return;
+    void this.agentService.updateConnections(
+      userId,
+      socket.id,
+      sanitizeConnections(data?.connections),
+    );
   }
 
   @SubscribeMessage('result')
-  handleResult(
-    @MessageBody()
-    data: {
-      requestId: string;
-      rows: any[];
-      rowCount: number;
-    },
-  ) {
-    this.agentService.handleResult(data.requestId, data.rows, data.rowCount);
+  handleResult(@ConnectedSocket() socket: Socket, @MessageBody() data: any) {
+    if (!this.socketToUserId.has(socket.id)) return;
+    this.agentService.handleResult(socket.id, data);
   }
 
   @SubscribeMessage('error')
-  handleError(@MessageBody() data: { requestId: string; message: string }) {
-    this.agentService.handleError(data.requestId, data.message);
+  handleError(@ConnectedSocket() socket: Socket, @MessageBody() data: any) {
+    if (!this.socketToUserId.has(socket.id)) return;
+    this.agentService.handleError(socket.id, data);
   }
 }

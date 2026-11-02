@@ -5,9 +5,13 @@ import { Collection } from './entities/collection.entity';
 import { QueryManagementService } from './query-management.service';
 import { QueryManagementController } from './query-management.controller';
 import { ClustersModule } from '../clusters/clusters.module';
+import { Cluster } from '../clusters/entities/cluster.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([SavedQuery, Collection]), ClustersModule],
+  imports: [
+    TypeOrmModule.forFeature([SavedQuery, Collection, Cluster]),
+    ClustersModule,
+  ],
   controllers: [QueryManagementController],
   providers: [QueryManagementService],
   exports: [QueryManagementService],

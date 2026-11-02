@@ -6,44 +6,49 @@ import {
   Param,
   Delete,
   Request,
-  UsePipes,
-  ValidationPipe,
   Query,
   Patch,
+  BadRequestException,
 } from '@nestjs/common';
 import { Cluster } from './entities/cluster.entity';
-import { ClustersService } from './clusters.service';
-import { CreateClusterDto } from './dto/create-cluster.dto';
+import { ClustersService, Filter } from './clusters.service';
+import { TransferService } from './transfer.service';
+import { CreateClusterDto, UpdateClusterDto } from './dto/create-cluster.dto';
+import {
+  DeleteRowsDto,
+  ExecuteQueryDto,
+  RestoreDto,
+  SyncSchemaDto,
+  UpdateRowsDto,
+} from './dto/data.dto';
 import { UserOwnedController } from '../common/controllers/user-owned.controller';
 
 @Controller('/v1/clusters')
 export class ClustersController extends UserOwnedController<Cluster> {
-  constructor(private readonly clustersService: ClustersService) {
+  constructor(
+    private readonly clustersService: ClustersService,
+    private readonly transferService: TransferService,
+  ) {
     super(clustersService);
   }
 
   @Post()
-  @UsePipes(ValidationPipe)
-  async create(
-    @Request() req: any,
-    @Body() createClusterDto: CreateClusterDto,
-  ) {
-    return this.clustersService.create(req.user.id, createClusterDto);
+  async create(@Request() req: any, @Body() dto: CreateClusterDto) {
+    return this.clustersService.create(req.user.id, dto);
   }
 
   @Post('/test')
-  @UsePipes(ValidationPipe)
-  async test(@Body() createClusterDto: CreateClusterDto) {
-    return this.clustersService.testConnection(createClusterDto);
+  async test(@Request() req: any, @Body() dto: CreateClusterDto) {
+    return this.clustersService.testConnection(dto, req.user.id);
   }
 
   @Patch(':id')
   async update(
     @Request() req: any,
     @Param('id') id: string,
-    @Body() body: Partial<CreateClusterDto>,
+    @Body() dto: UpdateClusterDto,
   ) {
-    return this.clustersService.updateCluster(id, req.user.id, body);
+    return this.clustersService.updateCluster(id, req.user.id, dto);
   }
 
   @Get(':id/tables')
@@ -70,26 +75,27 @@ export class ClustersController extends UserOwnedController<Cluster> {
     @Request() req: any,
     @Param('id') id: string,
     @Param('tableName') tableName: string,
-    @Query('page') page: string,
-    @Query('limit') limit: string,
-    @Query('filters') filters: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('filters') filters?: string,
   ) {
-    let parsedFilters = [];
+    let parsed: Filter[] = [];
     if (filters) {
       try {
-        parsedFilters = JSON.parse(filters);
-      } catch (e) {
-        console.error('Failed to parse filters:', e);
+        parsed = JSON.parse(filters) as Filter[];
+      } catch {
+        throw new BadRequestException('"filters" must be valid JSON.');
       }
+      if (!Array.isArray(parsed))
+        throw new BadRequestException('"filters" must be an array.');
     }
-
     return this.clustersService.findTableData(
       id,
       req.user.id,
       tableName,
-      page ? Number.parseInt(page) : 1,
-      limit ? Number.parseInt(limit) : 100,
-      parsedFilters,
+      page ? Number.parseInt(page, 10) : 1,
+      limit ? Number.parseInt(limit, 10) : 100,
+      parsed,
     );
   }
 
@@ -98,7 +104,7 @@ export class ClustersController extends UserOwnedController<Cluster> {
     @Request() req: any,
     @Param('id') id: string,
     @Param('tableName') tableName: string,
-    @Body() data: any,
+    @Body() data: Record<string, unknown>,
   ) {
     return this.clustersService.insertTableData(
       id,
@@ -113,7 +119,7 @@ export class ClustersController extends UserOwnedController<Cluster> {
     @Request() req: any,
     @Param('id') id: string,
     @Param('tableName') tableName: string,
-    @Body() body: { data: any; where: any },
+    @Body() body: UpdateRowsDto,
   ) {
     return this.clustersService.updateTableData(
       id,
@@ -129,13 +135,13 @@ export class ClustersController extends UserOwnedController<Cluster> {
     @Request() req: any,
     @Param('id') id: string,
     @Param('tableName') tableName: string,
-    @Body() body: { where: any },
+    @Body() body: DeleteRowsDto,
   ) {
     return this.clustersService.deleteTableData(
       id,
       req.user.id,
       tableName,
-      body.where,
+      body,
     );
   }
 
@@ -143,7 +149,7 @@ export class ClustersController extends UserOwnedController<Cluster> {
   async executeQuery(
     @Request() req: any,
     @Param('id') id: string,
-    @Body() body: { query: string; page?: number; limit?: number },
+    @Body() body: ExecuteQueryDto,
   ) {
     return this.clustersService.executeQuery(
       id,
@@ -182,14 +188,13 @@ export class ClustersController extends UserOwnedController<Cluster> {
     @Request() req: any,
     @Param('id') sourceId: string,
     @Param('targetId') targetId: string,
-    @Body() body: { tableNames: string[]; withData?: boolean },
+    @Body() body: SyncSchemaDto,
   ) {
-    return this.clustersService.syncSchema(
+    return this.transferService.syncSchema(
       sourceId,
       targetId,
       req.user.id,
-      body.tableNames,
-      body.withData || false,
+      body,
     );
   }
 
@@ -199,16 +204,16 @@ export class ClustersController extends UserOwnedController<Cluster> {
     @Param('id') id: string,
     @Query('format') format: 'sql' | 'csv' | 'json',
   ) {
-    return this.clustersService.backup(id, req.user.id, format);
+    return this.transferService.backup(id, req.user.id, format);
   }
 
   @Post(':id/restore')
   async restore(
     @Request() req: any,
     @Param('id') id: string,
-    @Body() body: { format: 'sql' | 'csv' | 'json'; data: any },
+    @Body() body: RestoreDto,
   ) {
-    return this.clustersService.restore(
+    return this.transferService.restore(
       id,
       req.user.id,
       body.format,

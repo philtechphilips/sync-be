@@ -22,6 +22,6 @@ export class AuthRepo extends BaseRepository<User> {
 
   async findAll(): Promise<User[]> {
     const users = await this.userRepo.find();
-    return users.map(({ password, ...user }) => user as User);
+    return users.map(({ password: _password, ...user }) => user as User);
   }
 }

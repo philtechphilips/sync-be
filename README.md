@@ -150,16 +150,47 @@ pnpm run start:dev
 ```env
 # APP
 PORT=3001
-ENVIRONMENT=development
+ENVIRONMENT=development            # development | staging | production
 
-# DATABASE (Metadata Store)
-DATABASE_URL=postgresql://user:pass@localhost:5432/synq_metadata
+# METADATA DATABASE (MySQL) — schema is managed by migrations that run on startup
+DB_HOST=localhost
+DB_PORT=3306
+DB_USERNAME=root
+DB_PASSWORD=secret
+DB_NAME=synq
+DB_ENCRYPTION_KEY=<64 hex chars>   # openssl rand -hex 32 — encrypts stored DB credentials
 
 # AUTH
-JWT_SECRET=your_super_secret_key
-JWT_REFRESH_SECRET=your_refresh_secret_key
+JWTSECRET=<long random string>     # openssl rand -hex 32 (a warning is logged if < 32 chars)
+JWT_RESET_SECRET=<optional>        # signs password-reset links; derived from JWTSECRET if unset
+JWT_ACCESS_EXPIRATION=15m
+JWT_REFRESH_EXPIRATION=7d          # refresh tokens are httpOnly cookies, stored hashed per session
 GOOGLE_CLIENT_ID=...
 GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=https://api.example.com/v1/auth/oauth/google/callback
+
+# COOKIES / PROXY
+COOKIE_SAMESITE=lax                # use "none" only if the frontend is on a different site
+COOKIE_DOMAIN=                     # optional
+TRUST_PROXY=loopback               # Express "trust proxy"; loopback = nginx on the same host
+
+# NETWORK SAFETY
+ALLOW_PRIVATE_DB_HOSTS=            # default: true only when ENVIRONMENT=development.
+                                   # When false, clusters can't point at private/loopback
+                                   # addresses; use the local agent for those.
+MAX_BACKUP_ROWS=1000000            # in-browser backups larger than this fail with a clear error
+
+# SCALING OUT (optional)
+REDIS_URL=redis://localhost:6379   # set when running more than one API instance: agent
+                                   # requests are routed to the instance holding the
+                                   # agent's socket, and rate limits are shared
+
+# EMAIL
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=...
+SMTP_PASS=...
+SMTP_FROM=...
 
 # AI
 OPENAI_API_KEY=sk-...
@@ -167,6 +198,8 @@ OPENAI_API_KEY=sk-...
 # FRONTEND
 FRONTEND_URL=http://localhost:3000
 ```
+
+Tests: see [test/README.md](test/README.md).
 
 ---
 

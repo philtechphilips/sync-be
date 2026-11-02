@@ -6,16 +6,18 @@ import {
   Patch,
   Param,
   UseGuards,
-  UsePipes,
-  ValidationPipe,
-  HttpException,
-  HttpStatus,
   Request,
   Res,
   Query,
+  HttpCode,
 } from '@nestjs/common';
-import { Response } from 'express';
-import { AuthService } from './auth.service';
+import type {
+  CookieOptions,
+  Request as ExpressRequest,
+  Response,
+} from 'express';
+import { randomBytes, timingSafeEqual } from 'crypto';
+import { AuthService, IssuedSession } from './auth.service';
 import { UpdateAuthDto } from './dto/update.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -23,189 +25,192 @@ import { LocalGuard } from './guards/local.guard';
 import { JwtAuthGuard } from './guards/jwt.guard';
 import { RegisterAuthDto } from './dto/register.dto';
 import { Public } from './decorators/public.decorators';
-import { Roles } from './decorators/role.decorators';
-import { Role } from '../common/enums/role.enum';
-import { LoginAuthDto } from './dto/login.dto';
-import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import {
+  CliLoginAuthorizeDto,
+  CliLoginDenyDto,
+  CliLoginInitDto,
+} from './dto/cli-login.dto';
 import { config } from '../config/config.service';
+import { User } from './entities/user.entity';
+
+export const REFRESH_COOKIE = 'synq_rt';
+const STATE_COOKIE = 'synq_oauth_state';
+
+function cookieOptions(path: string, maxAgeMs?: number): CookieOptions {
+  return {
+    httpOnly: true,
+    secure: config.COOKIE.SECURE || config.COOKIE.SAMESITE === 'none',
+    sameSite: config.COOKIE.SAMESITE,
+    domain: config.COOKIE.DOMAIN,
+    path,
+    ...(maxAgeMs !== undefined ? { maxAge: maxAgeMs } : {}),
+  };
+}
+
+function meta(req: ExpressRequest) {
+  return { userAgent: req.get('user-agent') ?? null, ip: req.ip ?? null };
+}
 
 @Controller('/v1/auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  private setRefreshCookie(
+    res: Response,
+    session: Pick<IssuedSession, 'refreshToken' | 'refreshExpiresAt'>,
+  ) {
+    res.cookie(
+      REFRESH_COOKIE,
+      session.refreshToken,
+      cookieOptions(
+        '/v1/auth',
+        session.refreshExpiresAt.getTime() - Date.now(),
+      ),
+    );
+  }
+
   @Post('login')
   @Public()
+  @HttpCode(200)
   @UseGuards(LocalGuard)
-  @UsePipes(ValidationPipe)
-  async login(@Body() authDto: LoginAuthDto) {
-    try {
-      const response = await this.authService.validateUser(authDto);
-      return {
-        success: true,
-        user: {
-          id: response.id,
-          email: response.email,
-          full_name: response.full_name,
-          role: response.role,
-          profile_picture: response.profile_picture,
-          settings: response.settings,
-        },
-        access_token: response.access_token,
-        refresh_token: response.refresh_token,
-        message: 'User logged in successfully!',
-      };
-    } catch (error) {
-      console.error('Login error:', error);
-      throw error;
-    }
+  async login(
+    @Request() req: ExpressRequest & { user: User },
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const session = await this.authService.issueSession(req.user, meta(req));
+    this.setRefreshCookie(res, session);
+    return {
+      success: true,
+      user: session.user,
+      access_token: session.access_token,
+      message: 'User logged in successfully!',
+    };
   }
 
   @Post('refresh')
   @Public()
-  @UsePipes(ValidationPipe)
-  async refresh(@Body() refreshTokenDto: RefreshTokenDto) {
-    try {
-      const response = await this.authService.refreshToken(
-        refreshTokenDto.refresh_token,
-      );
-      return response;
-    } catch (error) {
-      if (error.status === 401) {
-        throw new HttpException(
-          { success: false, message: error.message },
-          HttpStatus.UNAUTHORIZED,
-        );
-      }
-      console.error('Token refresh error:', error);
-      throw new HttpException(
-        { success: false, message: 'Something went wrong!' },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
+  @HttpCode(200)
+  async refresh(
+    @Request() req: ExpressRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const session = await this.authService.refresh(
+      req.cookies?.[REFRESH_COOKIE],
+    );
+    if (session.rotated) this.setRefreshCookie(res, session);
+    return { access_token: session.access_token, user: session.user };
+  }
+
+  @Post('logout')
+  @Public()
+  @HttpCode(200)
+  async logout(
+    @Request() req: ExpressRequest,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    await this.authService.logout(req.cookies?.[REFRESH_COOKIE]);
+    res.clearCookie(REFRESH_COOKIE, cookieOptions('/v1/auth'));
+    return { success: true };
   }
 
   @Post('register')
   @Public()
-  @UsePipes(ValidationPipe)
-  async create(@Body() registerDto: RegisterAuthDto) {
-    try {
-      const { password, ...user } = await this.authService.create(registerDto);
-      return {
-        success: true,
-        data: user,
-        message: 'Account created successfully!',
-      };
-    } catch (error) {
-      if (error.status === 400) {
-        throw new HttpException(
-          { success: false, message: error.message },
-          HttpStatus.BAD_REQUEST,
-        );
-      } else {
-        console.error('Registration error:', error);
-        throw new HttpException(
-          { success: false, message: 'Something went wrong!' },
-          HttpStatus.INTERNAL_SERVER_ERROR,
-        );
-      }
-    }
+  async create(@Body() dto: RegisterAuthDto) {
+    const user = await this.authService.create(dto);
+    return {
+      success: true,
+      data: user,
+      message: 'Account created successfully!',
+    };
   }
 
   @Get('oauth/google')
   @Public()
-  async initiateGoogleAuth(@Res() res: Response) {
-    try {
-      const authUrl = this.authService.getGoogleAuthUrl();
-      res.redirect(authUrl);
-    } catch (error) {
-      console.error('Google OAuth initialization error:', error);
-      throw new HttpException(
-        { success: false, message: 'Failed to initiate Google OAuth' },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
+  initiateGoogleAuth(@Res() res: Response) {
+    // `state` ties the callback to this browser (prevents login CSRF).
+    const state = randomBytes(24).toString('base64url');
+    res.cookie(
+      STATE_COOKIE,
+      state,
+      cookieOptions('/v1/auth/oauth', 10 * 60 * 1000),
+    );
+    res.redirect(this.authService.getGoogleAuthUrl(state));
   }
 
   @Get('oauth/google/callback')
   @Public()
-  async googleCallback(@Query('code') code: string, @Res() res: Response) {
-    try {
-      if (!code) {
-        return res.redirect(
-          `${config.FRONTEND_URL}/auth/error?message=Authorization code not provided`,
-        );
-      }
-
-      const response = await this.authService.handleGoogleCallback(code);
-
-      // Redirect to frontend with tokens as query params or use a more secure method
-      // For better security, you might want to set tokens in HTTP-only cookies instead
-      const redirectUrl = new URL(`${config.FRONTEND_URL}/auth/callback`);
-      redirectUrl.searchParams.set('access_token', response.access_token);
-      redirectUrl.searchParams.set('refresh_token', response.refresh_token);
-      redirectUrl.searchParams.set('user_id', response.id);
-
-      res.redirect(redirectUrl.toString());
-    } catch (error) {
-      console.error('Google OAuth callback error:', error);
-      const errorMessage = encodeURIComponent(
-        error.message || 'Failed to authenticate with Google',
+  async googleCallback(
+    @Request() req: ExpressRequest,
+    @Query('code') code: string,
+    @Query('state') state: string,
+    @Res() res: Response,
+  ) {
+    const fail = (message: string) =>
+      res.redirect(
+        `${config.FRONTEND_URL}/auth/login?error=${encodeURIComponent(message)}`,
       );
-      return res.redirect(
-        `${config.FRONTEND_URL}/auth/error?message=${errorMessage}`,
+
+    const expected = String(req.cookies?.[STATE_COOKIE] ?? '');
+    res.clearCookie(STATE_COOKIE, cookieOptions('/v1/auth/oauth'));
+    const stateOk =
+      !!state &&
+      expected.length === state.length &&
+      timingSafeEqual(Buffer.from(expected), Buffer.from(state));
+    if (!code || !stateOk)
+      return fail('Google sign-in could not be verified. Please try again.');
+
+    try {
+      const user = await this.authService.handleGoogleCallback(code);
+      const session = await this.authService.issueSession(user, meta(req));
+      // Tokens never go in the URL: the refresh cookie is set here and the
+      // frontend exchanges it for an access token on /auth/callback.
+      this.setRefreshCookie(res, session);
+      return res.redirect(`${config.FRONTEND_URL}/auth/callback`);
+    } catch (error) {
+      return fail(
+        (error as Error).message || 'Failed to authenticate with Google',
       );
     }
   }
 
   @Get('status')
-  @Roles(Role.User)
   @UseGuards(JwtAuthGuard)
   status(@Request() req: any) {
-    return this.authService.update(req.user.id, {}); // re-fetch fresh user
+    return this.authService.getProfile(req.user.id);
   }
 
   @Patch('/')
   @UseGuards(JwtAuthGuard)
-  @UsePipes(ValidationPipe)
-  update(@Request() req: any, @Body() updateAuthDto: UpdateAuthDto) {
-    return this.authService.update(req.user.id, updateAuthDto);
+  update(@Request() req: any, @Body() dto: UpdateAuthDto) {
+    return this.authService.updateProfile(req.user.id, dto);
   }
 
   @Patch('profile')
   @UseGuards(JwtAuthGuard)
-  @UsePipes(ValidationPipe)
   updateProfile(@Request() req: any, @Body() dto: UpdateProfileDto) {
     return this.authService.updateProfile(req.user.id, dto);
   }
 
   @Patch('password')
   @UseGuards(JwtAuthGuard)
-  @UsePipes(ValidationPipe)
   changePassword(@Request() req: any, @Body() dto: ChangePasswordDto) {
     return this.authService.changePassword(req.user.id, dto);
   }
 
   @Post('forgot-password')
   @Public()
-  @UsePipes(ValidationPipe)
-  async forgotPassword(@Body() forgotPasswordDto: ForgotPasswordDto) {
-    try {
-      return await this.authService.forgotPassword(forgotPasswordDto);
-    } catch (error) {
-      if (error.status === 400) {
-        throw new HttpException(
-          { success: false, message: error.message },
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-      console.error('Forgot password error:', error);
-      throw new HttpException(
-        { success: false, message: 'Something went wrong!' },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
+  @HttpCode(200)
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.authService.forgotPassword(dto);
+  }
+
+  @Post('reset-password')
+  @Public()
+  @HttpCode(200)
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto);
   }
 
   @Get('agent-key')
@@ -230,60 +235,35 @@ export class AuthController {
 
   @Post('cli-login/init')
   @Public()
-  initCliLogin() {
-    return this.authService.createCliLoginToken();
+  initCliLogin(@Request() req: ExpressRequest, @Body() dto: CliLoginInitDto) {
+    return this.authService.createCliLoginToken(dto?.hostname, req.ip);
   }
 
   @Get('cli-login/poll/:token')
   @Public()
   pollCliLogin(@Param('token') token: string) {
-    try {
-      return this.authService.pollCliLoginToken(token);
-    } catch (error) {
-      throw new HttpException(
-        { success: false, message: error.message },
-        HttpStatus.BAD_REQUEST,
-      );
-    }
+    return this.authService.pollCliLoginToken(token);
+  }
+
+  @Get('cli-login/info/:token')
+  @UseGuards(JwtAuthGuard)
+  cliLoginInfo(@Param('token') token: string) {
+    return this.authService.getCliLoginInfo(token);
   }
 
   @Post('cli-login/authorize')
   @UseGuards(JwtAuthGuard)
-  async authorizeCliLogin(
-    @Request() req: any,
-    @Body('loginToken') loginToken: string,
-  ) {
-    try {
-      return await this.authService.authorizeCliLoginToken(
-        req.user.id,
-        loginToken,
-      );
-    } catch (error) {
-      throw new HttpException(
-        { success: false, message: error.message },
-        HttpStatus.BAD_REQUEST,
-      );
-    }
+  authorizeCliLogin(@Request() req: any, @Body() dto: CliLoginAuthorizeDto) {
+    return this.authService.authorizeCliLoginToken(
+      req.user.id,
+      dto.loginToken,
+      dto.userCode,
+    );
   }
 
-  @Post('reset-password')
-  @Public()
-  @UsePipes(ValidationPipe)
-  async resetPassword(@Body() resetPasswordDto: ResetPasswordDto) {
-    try {
-      return await this.authService.resetPassword(resetPasswordDto);
-    } catch (error) {
-      if (error.status === 400) {
-        throw new HttpException(
-          { success: false, message: error.message },
-          HttpStatus.BAD_REQUEST,
-        );
-      }
-      console.error('Reset password error:', error);
-      throw new HttpException(
-        { success: false, message: 'Something went wrong!' },
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
+  @Post('cli-login/deny')
+  @UseGuards(JwtAuthGuard)
+  denyCliLogin(@Body() dto: CliLoginDenyDto) {
+    return this.authService.denyCliLoginToken(dto.loginToken);
   }
 }

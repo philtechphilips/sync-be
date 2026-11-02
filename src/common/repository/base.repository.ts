@@ -55,8 +55,8 @@ export abstract class BaseRepository<T extends ObjectLiteral> {
     return result.affected! > 0;
   }
 
-  async createQueryBuilder(alias?: string): Promise<SelectQueryBuilder<T>> {
-    return this.entity.createQueryBuilder(alias);
+  createQueryBuilder(alias?: string): Promise<SelectQueryBuilder<T>> {
+    return Promise.resolve(this.entity.createQueryBuilder(alias));
   }
 
   async saveMany(data: DeepPartial<T>[]): Promise<T[]> {
@@ -64,7 +64,7 @@ export abstract class BaseRepository<T extends ObjectLiteral> {
   }
 }
 
-export async function applyPagination<T extends ObjectLiteral>(
+export function applyPagination<T extends ObjectLiteral>(
   queryBuilder: SelectQueryBuilder<T>,
   pagination: IPaginationQuery,
 ): Promise<SelectQueryBuilder<T>> {
@@ -75,5 +75,5 @@ export async function applyPagination<T extends ObjectLiteral>(
 
   const skip = (current - 1) * numbersOfItems;
 
-  return queryBuilder.skip(skip).take(numbersOfItems);
+  return Promise.resolve(queryBuilder.skip(skip).take(numbersOfItems));
 }

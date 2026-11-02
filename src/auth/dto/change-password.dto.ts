@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsString, MinLength } from 'class-validator';
+import { IsNotEmpty, IsString, Length } from 'class-validator';
 
 export class ChangePasswordDto {
   @IsString()
@@ -6,7 +6,8 @@ export class ChangePasswordDto {
   current_password: string;
 
   @IsString()
-  @IsNotEmpty()
-  @MinLength(8)
+  @Length(8, 128, {
+    message: 'Password must be between 8 and 128 characters long',
+  })
   new_password: string;
 }

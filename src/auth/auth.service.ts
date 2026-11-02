@@ -3,14 +3,21 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   UnauthorizedException,
-  NotFoundException,
 } from '@nestjs/common';
-import { LoginAuthDto } from './dto/login.dto';
-import { UpdateAuthDto } from './dto/update.dto';
+import { InjectRepository } from '@nestjs/typeorm';
+import { LessThan, Repository } from 'typeorm';
+import { JwtService } from '@nestjs/jwt';
+import {
+  createHash,
+  randomBytes,
+  randomInt,
+  randomUUID,
+  timingSafeEqual,
+} from 'crypto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
-import { JwtService } from '@nestjs/jwt';
 import { RegisterAuthDto } from './dto/register.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
@@ -19,83 +26,259 @@ import { AuthRepo } from './repository/auth.repository';
 import { config } from '../config/config.service';
 import { EmailService } from '../common/services/email.service';
 import { AgentService } from '../agent/agent.service';
-import { randomUUID } from 'crypto';
+import { User } from './entities/user.entity';
+import { AuthSession } from './entities/auth-session.entity';
+import { CliLoginRequest } from './entities/cli-login-request.entity';
 
-interface CliLoginToken {
-  userId: string | null;
-  agentKey: string | null;
-  expiresAt: number;
+export interface SessionMeta {
+  userAgent?: string | null;
+  ip?: string | null;
+}
+
+export interface IssuedSession {
+  user: ReturnType<AuthService['getSafeUser']>;
+  access_token: string;
+  refreshToken: string;
+  refreshExpiresAt: Date;
+}
+
+const ROTATE_AFTER_MS = 24 * 60 * 60 * 1000;
+const PREVIOUS_TOKEN_GRACE_MS = 2 * 60 * 1000;
+const CLI_TOKEN_TTL_MS = 5 * 60 * 1000;
+const CLI_MAX_CODE_ATTEMPTS = 5;
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+const sha256 = (value: string) =>
+  createHash('sha256').update(value).digest('hex');
+
+function safeEqualHex(a: string | null | undefined, b: string): boolean {
+  if (!a || a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+}
+
+export function durationMs(expiration: string): number {
+  const m = /^\s*(\d+)\s*(ms|s|m|h|d|w)?\s*$/i.exec(expiration);
+  if (!m) return 7 * 24 * 60 * 60 * 1000;
+  const n = Number(m[1]);
+  const unit = (m[2] ?? 's').toLowerCase();
+  const factor: Record<string, number> = {
+    ms: 1,
+    s: 1000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+    w: 604_800_000,
+  };
+  return n * factor[unit];
 }
 
 @Injectable()
 export class AuthService {
-  // Short-lived in-memory store for browser-based CLI auth tokens
-  private readonly cliLoginTokens = new Map<string, CliLoginToken>();
+  private readonly logger = new Logger(AuthService.name);
 
   constructor(
     private readonly jwtService: JwtService,
     private readonly authRepo: AuthRepo,
     private readonly emailService: EmailService,
     private readonly agentService: AgentService,
+    @InjectRepository(AuthSession)
+    private readonly sessions: Repository<AuthSession>,
+    @InjectRepository(CliLoginRequest)
+    private readonly cliLogins: Repository<CliLoginRequest>,
   ) {}
 
-  async validateUser({ email, password }: LoginAuthDto) {
-    const findUser = await this.authRepo.findOne({ email });
+  // ─── Credentials ─────────────────────────────────────────────────────────
 
-    if (!findUser) throw new HttpException('Invalid credentials!', 400);
-
-    const isPasswordValid = await validatePassword(password, findUser.password);
-    if (!isPasswordValid)
-      throw new UnauthorizedException('Invalid credentials!');
-
-    return this.generateAuthResponse(findUser);
+  /** Same error for unknown email and wrong password (no account probing). */
+  async verifyCredentials(email: string, password: string): Promise<User> {
+    const user = await this.authRepo.findOne({
+      email: email.trim().toLowerCase(),
+    });
+    const valid =
+      !!user?.password &&
+      (await validatePassword(password, user.password).catch(() => false));
+    if (!user || !valid)
+      throw new UnauthorizedException('Invalid email or password.');
+    return user;
   }
 
-  async refreshToken(refreshToken: string) {
+  async create(dto: RegisterAuthDto) {
+    const email = dto.email.trim().toLowerCase();
+    if (await this.authRepo.findOne({ email })) {
+      throw new BadRequestException(
+        'An account with this email already exists.',
+      );
+    }
     try {
-      this.jwtService.verify(refreshToken, {
-        secret: config.JWT.REFRESH_SECRET,
+      const user = await this.authRepo.create({
+        email,
+        full_name: dto.full_name,
+        password: await hashPassword(dto.password),
+        requires_password: true,
+        email_verified: false,
+        provider: 'local',
+        role: 'user',
+        agentKey: randomUUID(),
       });
-
-      const findUser = await this.authRepo.findOne({
-        refresh_token: refreshToken,
-      });
-
-      if (!findUser) throw new UnauthorizedException('Invalid refresh token!');
-
-      if (
-        findUser.refresh_token_expiry &&
-        findUser.refresh_token_expiry < new Date()
-      ) {
-        throw new UnauthorizedException('Refresh token has expired!');
-      }
-
-      return this.generateAuthResponse(findUser);
+      return this.getSafeUser(user);
     } catch (error) {
-      console.error('Refresh token error:', error);
-      throw new UnauthorizedException('Invalid refresh token!');
+      if ((error as { code?: string }).code === 'ER_DUP_ENTRY') {
+        throw new BadRequestException(
+          'An account with this email already exists.',
+        );
+      }
+      throw error;
     }
   }
 
-  async create(registerDto: RegisterAuthDto) {
-    const existingUser = await this.authRepo.findOne({
-      email: registerDto.email,
-    });
+  // ─── Sessions ────────────────────────────────────────────────────────────
 
-    if (existingUser) {
-      throw new BadRequestException('Account with this details exist!');
-    }
-    const password = await hashPassword(registerDto.password);
-    registerDto.password = password;
-    return await this.authRepo.create({
-      ...registerDto,
-      agentKey: randomUUID(),
-    });
+  private signAccessToken(user: User, sessionId: string) {
+    return this.jwtService.sign(
+      {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        full_name: user.full_name,
+        type: 'access',
+        sid: sessionId,
+      },
+      { expiresIn: config.JWT.ACCESS_EXPIRATION },
+    );
   }
+
+  /** Creates a session and returns the access token plus the refresh cookie value. */
+  async issueSession(
+    user: User,
+    meta: SessionMeta = {},
+  ): Promise<IssuedSession> {
+    const secret = randomBytes(32).toString('base64url');
+    const expiresAt = new Date(
+      Date.now() + durationMs(config.JWT.REFRESH_EXPIRATION),
+    );
+    const session = await this.sessions.save(
+      this.sessions.create({
+        userId: user.id,
+        tokenHash: sha256(secret),
+        expiresAt,
+        userAgent: meta.userAgent?.slice(0, 255) ?? null,
+        ip: meta.ip?.slice(0, 64) ?? null,
+      }),
+    );
+    void this.sessions
+      .delete({ userId: user.id, expiresAt: LessThan(new Date()) })
+      .catch(() => undefined);
+    return {
+      user: this.getSafeUser(user),
+      access_token: this.signAccessToken(user, session.id),
+      refreshToken: `${session.id}.${secret}`,
+      refreshExpiresAt: expiresAt,
+    };
+  }
+
+  /**
+   * Exchanges a refresh token for a new access token. The refresh token is
+   * rotated daily; the previous one stays valid for two minutes so tabs
+   * refreshing at the same moment don't log each other out. Reusing an
+   * older token revokes the session.
+   */
+  async refresh(
+    refreshToken: string | undefined,
+  ): Promise<IssuedSession & { rotated: boolean }> {
+    const [sessionId, secret] = String(refreshToken ?? '').split('.');
+    if (!sessionId || !secret)
+      throw new UnauthorizedException('Not signed in.');
+    const session = await this.sessions.findOne({ where: { id: sessionId } });
+    if (!session || session.expiresAt < new Date()) {
+      throw new UnauthorizedException(
+        'Your session has expired. Please sign in again.',
+      );
+    }
+
+    const hash = sha256(secret);
+    const current = safeEqualHex(session.tokenHash, hash);
+    const previous =
+      !current &&
+      safeEqualHex(session.previousTokenHash, hash) &&
+      !!session.rotatedAt &&
+      Date.now() - session.rotatedAt.getTime() < PREVIOUS_TOKEN_GRACE_MS;
+    if (!current && !previous) {
+      await this.sessions.delete({ id: session.id });
+      throw new UnauthorizedException(
+        'Your session is no longer valid. Please sign in again.',
+      );
+    }
+
+    const user = await this.authRepo.findOne({ id: session.userId });
+    if (!user) throw new UnauthorizedException('Not signed in.');
+
+    let token = refreshToken!;
+    let rotated = false;
+    const lastRotation = (session.rotatedAt ?? session.createdAt).getTime();
+    if (current && Date.now() - lastRotation > ROTATE_AFTER_MS) {
+      const next = randomBytes(32).toString('base64url');
+      session.previousTokenHash = session.tokenHash;
+      session.tokenHash = sha256(next);
+      session.rotatedAt = new Date();
+      session.expiresAt = new Date(
+        Date.now() + durationMs(config.JWT.REFRESH_EXPIRATION),
+      );
+      await this.sessions.save(session);
+      token = `${session.id}.${next}`;
+      rotated = true;
+    }
+    return {
+      user: this.getSafeUser(user),
+      access_token: this.signAccessToken(user, session.id),
+      refreshToken: token,
+      refreshExpiresAt: session.expiresAt,
+      rotated,
+    };
+  }
+
+  async logout(refreshToken: string | undefined) {
+    const [sessionId] = String(refreshToken ?? '').split('.');
+    if (sessionId)
+      await this.sessions.delete({ id: sessionId }).catch(() => undefined);
+  }
+
+  private async revokeAllSessions(userId: string) {
+    await this.sessions.delete({ userId });
+  }
+
+  // ─── Profile ─────────────────────────────────────────────────────────────
+
+  async getProfile(id: string) {
+    return this.getSafeUser(await this.findUserOrThrow(id));
+  }
+
+  async updateProfile(id: string, dto: UpdateProfileDto) {
+    const user = await this.findUserOrThrow(id);
+    if (dto.full_name !== undefined) user.full_name = dto.full_name;
+    if (dto.profile_picture !== undefined)
+      user.profile_picture = dto.profile_picture;
+    if (dto.settings !== undefined) user.settings = dto.settings;
+    await this.authRepo.save(user);
+    return this.getSafeUser(user);
+  }
+
+  async changePassword(id: string, dto: ChangePasswordDto) {
+    const user = await this.findUserOrThrow(id);
+    const valid =
+      !!user.password &&
+      (await validatePassword(dto.current_password, user.password).catch(
+        () => false,
+      ));
+    if (!valid) throw new BadRequestException('Current password is incorrect.');
+    user.password = await hashPassword(dto.new_password);
+    await this.authRepo.save(user);
+    return { success: true, message: 'Password updated successfully.' };
+  }
+
+  // ─── Agent key ───────────────────────────────────────────────────────────
 
   async getAgentKey(userId: string): Promise<{ agentKey: string }> {
     const user = await this.findUserOrThrow(userId);
-    // Backfill key for users created before this feature
     if (!user.agentKey) {
       user.agentKey = randomUUID();
       await this.authRepo.save(user);
@@ -105,81 +288,48 @@ export class AuthService {
 
   async rotateAgentKey(userId: string): Promise<{ agentKey: string }> {
     const user = await this.findUserOrThrow(userId);
-    this.agentService.deregisterByUserId(userId);
+    await this.agentService.deregisterByUserId(userId);
     user.agentKey = randomUUID();
     await this.authRepo.save(user);
     return { agentKey: user.agentKey };
   }
 
-  async getAgentStatus(userId: string): Promise<{ connected: boolean }> {
-    return { connected: this.agentService.isAgentConnected(userId) };
+  getAgentStatus(userId: string) {
+    return this.agentService.getStatus(userId);
   }
 
-  async update(id: string, updateAuthDto: UpdateAuthDto) {
-    const findUser = await this.findUserOrThrow(id);
-    Object.assign(findUser, updateAuthDto);
-    await this.authRepo.save(findUser);
-    return this.getSafeUser(findUser);
-  }
+  // ─── Google OAuth ────────────────────────────────────────────────────────
 
-  async updateProfile(id: string, dto: UpdateProfileDto) {
-    const user = await this.findUserOrThrow(id);
-
-    if (dto.full_name !== undefined) user.full_name = dto.full_name;
-    if (dto.profile_picture !== undefined)
-      user.profile_picture = dto.profile_picture;
-    if (dto.settings !== undefined) {
-      user.settings = dto.settings;
-    }
-
-    await this.authRepo.save(user);
-    return this.getSafeUser(user);
-  }
-
-  async changePassword(id: string, dto: ChangePasswordDto) {
-    const user = await this.findUserOrThrow(id);
-
-    const valid = await validatePassword(dto.current_password, user.password);
-    if (!valid) throw new BadRequestException('Current password is incorrect.');
-
-    user.password = await hashPassword(dto.new_password);
-    await this.authRepo.save(user);
-
-    return { success: true, message: 'Password updated successfully.' };
-  }
-
-  getGoogleAuthUrl(): string {
+  getGoogleAuthUrl(state: string): string {
     const params = new URLSearchParams({
       client_id: config.GOOGLE.CLIENT_ID,
       redirect_uri: config.GOOGLE.REDIRECT_URI,
       response_type: 'code',
       scope: 'openid email profile',
-      access_type: 'offline',
-      prompt: 'consent',
+      prompt: 'select_account',
+      state,
     });
-
     return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
   }
 
-  async handleGoogleCallback(code: string) {
+  async handleGoogleCallback(code: string): Promise<User> {
     try {
       const accessToken = await this.exchangeGoogleCodeForToken(code);
-      const googleUserInfo = await this.fetchGoogleUserInfo(accessToken);
-
-      if (!googleUserInfo.email) {
-        throw new BadRequestException('Email is required from Google account!');
+      const info = await this.fetchGoogleUserInfo(accessToken);
+      if (!info.email || info.verified_email !== true) {
+        throw new BadRequestException(
+          'Your Google account email is not verified.',
+        );
       }
-
-      const user = await this.getOrCreateGoogleUser(googleUserInfo);
-      return this.generateAuthResponse(user);
+      return await this.getOrCreateGoogleUser(info);
     } catch (error) {
-      console.log(error);
       if (
         error instanceof UnauthorizedException ||
         error instanceof BadRequestException
       ) {
         throw error;
       }
+      this.logger.error(`Google OAuth failed: ${(error as Error).message}`);
       throw new HttpException(
         'Failed to authenticate with Google',
         HttpStatus.INTERNAL_SERVER_ERROR,
@@ -199,269 +349,250 @@ export class AuthService {
         grant_type: 'authorization_code',
       }),
     });
-
-    if (!tokenResponse.ok) {
-      const errorData: any = await tokenResponse.json();
+    const data: any = await tokenResponse.json().catch(() => ({}));
+    if (!tokenResponse.ok || !data.access_token) {
       throw new UnauthorizedException(
-        errorData.error_description || 'Failed to exchange code for tokens',
+        data.error_description || 'Failed to exchange code for tokens',
       );
     }
-
-    const tokenData: any = await tokenResponse.json();
-    return tokenData.access_token;
+    return data.access_token as string;
   }
 
   private async fetchGoogleUserInfo(accessToken: string) {
     const response = await fetch(
       'https://www.googleapis.com/oauth2/v2/userinfo',
-      { headers: { Authorization: `Bearer ${accessToken}` } },
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
     );
-
-    if (!response.ok) {
+    if (!response.ok)
       throw new UnauthorizedException('Failed to fetch user info from Google');
-    }
-
     return (await response.json()) as {
       id: string;
       email: string;
+      verified_email?: boolean;
       name?: string;
       picture?: string;
     };
   }
 
-  private async getOrCreateGoogleUser(googleUserInfo: {
+  private async getOrCreateGoogleUser(info: {
     id: string;
     email: string;
     name?: string;
     picture?: string;
-  }) {
-    let user = await this.authRepo.findOne({ google_id: googleUserInfo.id });
+  }): Promise<User> {
+    const email = info.email.trim().toLowerCase();
+    let user = await this.authRepo.findOne({ google_id: info.id });
+    user ??= await this.authRepo.findOne({ email });
 
-    user ??= await this.authRepo.findOne({ email: googleUserInfo.email });
-
-    if (user) {
-      let updated = false;
-      if (!user.google_id) {
-        user.google_id = googleUserInfo.id;
-        user.provider = 'google';
-        updated = true;
-      }
-      if (
-        googleUserInfo.picture &&
-        user.profile_picture !== googleUserInfo.picture
-      ) {
-        user.profile_picture = googleUserInfo.picture;
-        updated = true;
-      }
-      if (googleUserInfo.name && user.full_name !== googleUserInfo.name) {
-        user.full_name = googleUserInfo.name;
-        updated = true;
-      }
-      if (updated) await this.authRepo.save(user);
-      return user;
-    }
-
-    return this.authRepo.create({
-      email: googleUserInfo.email,
-      full_name: googleUserInfo.name || undefined,
-      profile_picture: googleUserInfo.picture || undefined,
-      provider: 'google',
-      google_id: googleUserInfo.id,
-      requires_password: false,
-      role: 'user',
-      agentKey: randomUUID(),
-    });
-  }
-
-  private async generateAuthResponse(user: any) {
-    const payload = {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      full_name: user.full_name,
-      profile_picture: user.profile_picture,
-    };
-
-    const accessToken = this.jwtService.sign(payload, {
-      expiresIn: config.JWT.ACCESS_EXPIRATION,
-    });
-
-    const refreshToken = this.jwtService.sign(payload, {
-      secret: config.JWT.REFRESH_SECRET,
-      expiresIn: config.JWT.REFRESH_EXPIRATION,
-    });
-
-    const refreshTokenExpiry = this.calculateTokenExpiry(
-      config.JWT.REFRESH_EXPIRATION,
-    );
-
-    user.refresh_token = refreshToken;
-    user.refresh_token_expiry = refreshTokenExpiry;
-    user.access_token = accessToken;
-    await this.authRepo.save(user);
-
-    const safeUser = this.getSafeUser(user);
-    return {
-      ...safeUser,
-      access_token: accessToken,
-      refresh_token: refreshToken,
-    };
-  }
-
-  async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
-    try {
-      const user = await this.authRepo.findOne({
-        email: forgotPasswordDto.email,
+    if (!user) {
+      return this.authRepo.create({
+        email,
+        full_name: info.name || undefined,
+        profile_picture: info.picture || undefined,
+        provider: 'google',
+        google_id: info.id,
+        requires_password: false,
+        email_verified: true,
+        role: 'user',
+        agentKey: randomUUID(),
       });
-
-      // Don't reveal if user exists or not for security reasons
-      if (!user) {
-        // Return success even if user doesn't exist to prevent email enumeration
-        return {
-          success: true,
-          message:
-            'If an account with that email exists, a password reset link has been sent.',
-        };
-      }
-
-      // Check if user requires password (not OAuth-only users)
-      if (!user.requires_password) {
-        return {
-          success: true,
-          message:
-            'If an account with that email exists, a password reset link has been sent.',
-        };
-      }
-
-      // Generate JWT reset token with user ID, expires in 1 hour
-      const resetToken = this.jwtService.sign(
-        { id: user.id, email: user.email, type: 'password_reset' },
-        { expiresIn: '1h' },
-      );
-
-      // Send reset email
-      await this.emailService.sendPasswordResetEmail(user.email, resetToken);
-
-      return {
-        success: true,
-        message:
-          'If an account with that email exists, a password reset link has been sent.',
-      };
-    } catch (error) {
-      console.error('Forgot password error:', error);
-      throw new HttpException(
-        'Failed to process password reset request',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
     }
+
+    if (!user.google_id) {
+      // Google has just proven who owns this address. If the existing
+      // account's email was never verified, anyone could have registered it,
+      // so its password and sessions are discarded before linking.
+      if (!user.email_verified) {
+        user.password = null;
+        await this.revokeAllSessions(user.id);
+      }
+      user.google_id = info.id;
+      user.provider = 'google';
+    }
+    user.email_verified = true;
+    if (info.picture) user.profile_picture = info.picture;
+    if (info.name && !user.full_name) user.full_name = info.name;
+    await this.authRepo.save(user);
+    return user;
   }
 
-  async resetPassword(resetPasswordDto: ResetPasswordDto) {
-    try {
-      // Verify and decode the JWT token
-      let decoded: any;
-      try {
-        decoded = this.jwtService.verify(resetPasswordDto.token);
-      } catch (error) {
-        console.error('JWT verification error during password reset:', error);
-        throw new BadRequestException('Invalid or expired reset token');
-      }
+  // ─── Password reset ──────────────────────────────────────────────────────
 
-      // Verify token type
-      if (decoded.type !== 'password_reset') {
-        throw new BadRequestException('Invalid reset token');
-      }
-
-      // Find user by ID from token
-      const user = await this.authRepo.findOne({ id: decoded.id });
-
-      if (!user) {
-        throw new BadRequestException('User not found');
-      }
-
-      // Check if user requires password (not OAuth-only users)
-      if (!user.requires_password) {
-        throw new BadRequestException(
-          'Password reset is not available for this account',
-        );
-      }
-
-      // Hash new password
-      const hashedPassword = await hashPassword(resetPasswordDto.password);
-
-      // Update user password
-      user.password = hashedPassword;
-      await this.authRepo.save(user);
-
-      return {
-        success: true,
-        message: 'Password has been reset successfully',
-      };
-    } catch (error) {
-      if (
-        error instanceof BadRequestException ||
-        error instanceof NotFoundException
-      ) {
-        throw error;
-      }
-      console.error('Reset password error:', error);
-      throw new HttpException(
-        'Failed to reset password',
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
+  /** Changes whenever the password does, which makes reset links single-use. */
+  private passwordFingerprint(user: User) {
+    return sha256(`${user.id}:${user.password ?? ''}`).slice(0, 16);
   }
 
-  // ─── Browser-based CLI auth ───────────────────────────────────────────────
-
-  createCliLoginToken(): { loginToken: string } {
-    // Prune expired tokens
-    const now = Date.now();
-    for (const [k, v] of this.cliLoginTokens) {
-      if (v.expiresAt < now) this.cliLoginTokens.delete(k);
-    }
-
-    const loginToken = randomUUID();
-    this.cliLoginTokens.set(loginToken, {
-      userId: null,
-      agentKey: null,
-      expiresAt: now + 5 * 60 * 1000, // 5 minutes
+  async forgotPassword(dto: ForgotPasswordDto) {
+    const generic = {
+      success: true,
+      message:
+        'If an account with that email exists, a password reset link has been sent.',
+    };
+    const user = await this.authRepo.findOne({
+      email: dto.email.trim().toLowerCase(),
     });
-    return { loginToken };
+    if (!user || !user.requires_password) return generic;
+
+    const token = this.jwtService.sign(
+      {
+        sub: user.id,
+        type: 'password_reset',
+        pwf: this.passwordFingerprint(user),
+      },
+      { secret: config.JWT.RESET_SECRET, expiresIn: '1h' },
+    );
+    try {
+      await this.emailService.sendPasswordResetEmail(user.email, token);
+    } catch (error) {
+      this.logger.error(
+        `Failed to send reset email: ${(error as Error).message}`,
+      );
+      throw new HttpException(
+        'Failed to send the reset email. Please try again.',
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+    return generic;
+  }
+
+  async resetPassword(dto: ResetPasswordDto) {
+    let decoded: { sub?: string; type?: string; pwf?: string };
+    try {
+      decoded = this.jwtService.verify(dto.token, {
+        secret: config.JWT.RESET_SECRET,
+      });
+    } catch {
+      throw new BadRequestException(
+        'This reset link is invalid or has expired.',
+      );
+    }
+    if (decoded.type !== 'password_reset' || !decoded.sub) {
+      throw new BadRequestException(
+        'This reset link is invalid or has expired.',
+      );
+    }
+    const user = await this.authRepo.findOne({ id: decoded.sub });
+    if (!user || decoded.pwf !== this.passwordFingerprint(user)) {
+      throw new BadRequestException('This reset link has already been used.');
+    }
+    if (!user.requires_password) {
+      throw new BadRequestException(
+        'Password reset is not available for this account.',
+      );
+    }
+
+    user.password = await hashPassword(dto.password);
+    user.email_verified = true; // they received the email
+    await this.authRepo.save(user);
+    await this.revokeAllSessions(user.id);
+    return {
+      success: true,
+      message: 'Password has been reset successfully. Please sign in.',
+    };
+  }
+
+  // ─── Browser-based CLI auth ──────────────────────────────────────────────
+  // Pending logins live in the database so any API instance can serve them.
+
+  private newUserCode() {
+    const pick = () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
+    return `${Array.from({ length: 4 }, pick).join('')}-${Array.from({ length: 4 }, pick).join('')}`;
+  }
+
+  async createCliLoginToken(hostname?: string, ip?: string) {
+    await this.cliLogins.delete({ expiresAt: LessThan(new Date()) });
+    const loginToken = randomBytes(24).toString('base64url');
+    const userCode = this.newUserCode();
+    await this.cliLogins.save(
+      this.cliLogins.create({
+        id: sha256(loginToken),
+        userCode,
+        hostname: hostname?.slice(0, 100) || null,
+        ip: ip?.slice(0, 64) ?? null,
+        status: 'pending',
+        expiresAt: new Date(Date.now() + CLI_TOKEN_TTL_MS),
+      }),
+    );
+    return { loginToken, userCode, expiresIn: CLI_TOKEN_TTL_MS / 1000 };
+  }
+
+  private async liveCliToken(loginToken: string) {
+    const entry = await this.cliLogins.findOne({
+      where: { id: sha256(String(loginToken)) },
+    });
+    if (!entry || entry.expiresAt < new Date()) {
+      throw new BadRequestException(
+        'This login request is invalid or has expired.',
+      );
+    }
+    return entry;
+  }
+
+  /** What the browser shows before approving (never the code itself). */
+  async getCliLoginInfo(loginToken: string) {
+    const entry = await this.liveCliToken(loginToken);
+    if (entry.status !== 'pending') {
+      throw new BadRequestException('This login request was already handled.');
+    }
+    return {
+      hostname: entry.hostname,
+      ip: entry.ip,
+      requestedAt: entry.createdAt.toISOString(),
+    };
   }
 
   async authorizeCliLoginToken(
     userId: string,
     loginToken: string,
-  ): Promise<{ success: boolean }> {
-    const entry = this.cliLoginTokens.get(loginToken);
-    if (!entry || entry.expiresAt < Date.now()) {
-      throw new BadRequestException('Login token is invalid or has expired.');
+    userCode: string,
+  ) {
+    const entry = await this.liveCliToken(loginToken);
+    if (entry.status !== 'pending') {
+      throw new BadRequestException('This login request was already handled.');
     }
-    if (entry.userId !== null) {
-      throw new BadRequestException('Login token has already been used.');
+    const normalize = (c: string) => c.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (normalize(userCode) !== normalize(entry.userCode)) {
+      // Atomic increment so parallel guesses can't exceed the limit.
+      await this.cliLogins.increment({ id: entry.id }, 'attempts', 1);
+      if (entry.attempts + 1 >= CLI_MAX_CODE_ATTEMPTS)
+        await this.cliLogins.delete({ id: entry.id });
+      throw new BadRequestException(
+        "That code doesn't match the one shown in your terminal.",
+      );
     }
-
-    const { agentKey } = await this.getAgentKey(userId);
-    entry.userId = userId;
-    entry.agentKey = agentKey;
+    // Only one approval wins, even if two arrive at once.
+    const claimed = await this.cliLogins.update(
+      { id: entry.id, status: 'pending' },
+      { status: 'authorized', userId },
+    );
+    if (!claimed.affected)
+      throw new BadRequestException('This login request was already handled.');
     return { success: true };
   }
 
-  pollCliLoginToken(loginToken: string): {
-    status: 'pending' | 'authorized';
-    agentKey?: string;
-  } {
-    const entry = this.cliLoginTokens.get(loginToken);
-    if (!entry || entry.expiresAt < Date.now()) {
-      throw new BadRequestException('Login token is invalid or has expired.');
-    }
-    if (entry.agentKey) {
-      this.cliLoginTokens.delete(loginToken);
-      return { status: 'authorized', agentKey: entry.agentKey };
-    }
-    return { status: 'pending' };
+  async denyCliLoginToken(loginToken: string) {
+    const entry = await this.liveCliToken(loginToken);
+    await this.cliLogins.update(
+      { id: entry.id, status: 'pending' },
+      { status: 'denied' },
+    );
+    return { success: true };
   }
+
+  async pollCliLoginToken(loginToken: string) {
+    const entry = await this.liveCliToken(loginToken);
+    if (entry.status === 'pending') return { status: 'pending' as const };
+    await this.cliLogins.delete({ id: entry.id });
+    if (entry.status === 'denied' || !entry.userId)
+      return { status: 'denied' as const };
+    const { agentKey } = await this.getAgentKey(entry.userId);
+    return { status: 'authorized' as const, agentKey };
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────
 
   private async findUserOrThrow(id: string) {
     const user = await this.authRepo.findOne({ id });
@@ -469,39 +600,18 @@ export class AuthService {
     return user;
   }
 
-  private getSafeUser(user: any) {
-    const {
-      password,
-      access_token,
-      refresh_token,
-      refresh_token_expiry,
-      ...safeUser
-    } = user;
-    return safeUser;
-  }
-
-  private calculateTokenExpiry(expiration: string): Date {
-    const expiryDate = new Date();
-    const expirationStr = expiration.toLowerCase().trim();
-
-    // Parse expiration string (e.g., "7d", "7 days", "14d", "30d", "3600s", "1h", etc.)
-    if (expirationStr.endsWith('d') || expirationStr.includes('day')) {
-      const days = Number.parseInt(expirationStr) || 7;
-      expiryDate.setDate(expiryDate.getDate() + days);
-    } else if (expirationStr.endsWith('h') || expirationStr.includes('hour')) {
-      const hours = Number.parseInt(expirationStr) || 1;
-      expiryDate.setHours(expiryDate.getHours() + hours);
-    } else if (expirationStr.endsWith('m') || expirationStr.includes('min')) {
-      const minutes = Number.parseInt(expirationStr) || 15;
-      expiryDate.setMinutes(expiryDate.getMinutes() + minutes);
-    } else if (expirationStr.endsWith('s') || expirationStr.includes('sec')) {
-      const seconds = Number.parseInt(expirationStr) || 3600;
-      expiryDate.setSeconds(expiryDate.getSeconds() + seconds);
-    } else {
-      // Default to 7 days if format is not recognized
-      expiryDate.setDate(expiryDate.getDate() + 7);
-    }
-
-    return expiryDate;
+  getSafeUser(user: User) {
+    return {
+      id: user.id,
+      email: user.email,
+      full_name: user.full_name,
+      role: user.role,
+      profile_picture: user.profile_picture,
+      settings: user.settings,
+      provider: user.provider,
+      has_password: !!user.password,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    };
   }
 }

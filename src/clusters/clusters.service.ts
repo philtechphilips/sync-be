@@ -1,1428 +1,796 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import * as mysql from 'mysql2/promise';
-import { Client } from 'pg';
-import * as mssql from 'mssql';
-import Database from 'better-sqlite3';
 import { Cluster, ClusterType } from './entities/cluster.entity';
 import { QueryLog } from './entities/query-log.entity';
-import { CreateClusterDto } from './dto/create-cluster.dto';
+import { User } from '../auth/entities/user.entity';
+import { CreateClusterDto, UpdateClusterDto } from './dto/create-cluster.dto';
 import { CryptographyService } from '../common/services/cryptography.service';
-import { AgentService } from '../agent/agent.service';
-
 import { UserOwnedService } from '../common/services/user-owned.service';
+import { DbExecutor } from './engine/executor';
+import { Dialect, dialectFor, matchKey, tableRef } from './engine/dialects';
+import { coerceValue, toText } from './engine/values';
+import {
+  findDestructiveStatements,
+  isSingleRowQuery,
+} from './engine/sql-splitter';
+import {
+  ColumnInfo,
+  ConnectionTarget,
+  ForeignKeyInfo,
+  IndexInfo,
+  Row,
+  ValueKind,
+} from './engine/types';
+
+const SENSITIVE_FIELDS = [
+  'name',
+  'host',
+  'username',
+  'password',
+  'database',
+] as const;
+const CONNECTION_FIELDS = [
+  'type',
+  'host',
+  'port',
+  'username',
+  'password',
+  'database',
+  'sslMode',
+  'isLocal',
+  'agentConnection',
+] as const;
+const ENCRYPTED_RE = /^[0-9a-f]{24}:[0-9a-f]{32}:[0-9a-f]*$/i;
+const MAX_PAGE_SIZE = 50_000;
+
+export interface Filter {
+  column: string;
+  operator: string;
+  value?: unknown;
+}
+
+interface Clause {
+  sql: string;
+  params: unknown[];
+  kinds: (ValueKind | null)[];
+}
 
 @Injectable()
 export class ClustersService extends UserOwnedService<Cluster> {
-  private mysqlPools = new Map<string, mysql.Pool>();
-  private pgPools = new Map<string, any>();
-  private mssqlPools = new Map<string, mssql.ConnectionPool>();
-  private sqliteDbs = new Map<string, Database.Database>();
-
   constructor(
     @InjectRepository(Cluster)
     clusterRepo: Repository<Cluster>,
     @InjectRepository(QueryLog)
     private readonly queryLogRepo: Repository<QueryLog>,
+    @InjectRepository(User)
+    private readonly userRepo: Repository<User>,
     private readonly cryptographyService: CryptographyService,
-    private readonly agentService: AgentService,
+    private readonly executor: DbExecutor,
   ) {
     super(clusterRepo, 'Cluster');
   }
 
-  private async executeViaAgent(
-    cluster: Cluster,
-    sql: string,
-    params: any[] = [],
-    namedParams: Record<string, any> = {},
-  ): Promise<{ rows: any[]; rowCount: number }> {
-    return this.agentService.routeQuery(
-      { ...cluster, userId: cluster.userId },
-      sql,
-      params,
-      namedParams,
-    );
-  }
+  // ─── Credentials ─────────────────────────────────────────────────────────
 
-  private getMySQLPool(cluster: Cluster): mysql.Pool {
-    const { id, host, port, username, database, password } = cluster;
-    let pool = this.mysqlPools.get(id);
-    if (!pool) {
-      pool = mysql.createPool({
-        host,
-        port,
-        user: username,
-        password,
-        database,
-        waitForConnections: true,
-        connectionLimit: 10,
-        queueLimit: 0,
-        multipleStatements: true,
-      });
-      this.mysqlPools.set(id, pool);
-    }
-    return pool;
-  }
-
-  private getPGPool(cluster: Cluster): any {
-    const { id, host, port, username, database, password } = cluster;
-    let pool = this.pgPools.get(id);
-    if (!pool) {
-      const { Pool } = require('pg');
-      pool = new Pool({
-        host,
-        port,
-        user: username,
-        password,
-        database,
-        max: 10,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 10000,
-      });
-      pool.on('error', (err: any) => {
-        console.error(
-          `Unexpected error on idle client for cluster ${id}:`,
-          err,
-        );
-      });
-      this.pgPools.set(id, pool);
-    }
-    return pool;
-  }
-
-  private async getMSSQLPool(cluster: Cluster): Promise<mssql.ConnectionPool> {
-    const { id, host, port, username, database, password } = cluster;
-    let pool = this.mssqlPools.get(id);
-    if (!pool || !pool.connected) {
-      const config: mssql.config = {
-        server: host,
-        port: port || 1433,
-        user: username,
-        password: password,
-        database: database,
-        options: {
-          encrypt: true,
-          trustServerCertificate: true,
-        },
-      };
-      pool = new mssql.ConnectionPool(config);
-      await pool.connect();
-      this.mssqlPools.set(id, pool);
-    }
-    return pool;
-  }
-
-  private getSQLiteDb(cluster: Cluster): Database.Database {
-    const { id, host } = cluster;
-    let db = this.sqliteDbs.get(id);
-    if (!db) {
-      // For SQLite, `host` is the file path to the .db file
-      db = new Database(host, { readonly: false });
-      db.pragma('journal_mode = WAL');
-      this.sqliteDbs.set(id, db);
-    }
-    return db;
-  }
-
-  // Run a synchronous better-sqlite3 call in a Promise so it fits the async service pattern
-  private runSQLite<T>(
-    cluster: Cluster,
-    fn: (db: Database.Database) => T,
-  ): Promise<T> {
-    return new Promise((resolve, reject) => {
-      try {
-        resolve(fn(this.getSQLiteDb(cluster)));
-      } catch (e) {
-        reject(e);
-      }
-    });
-  }
-
-  private decryptCluster(cluster: Cluster): Cluster {
-    if (!cluster) return cluster;
-    const sensitiveFields: (keyof Cluster)[] = [
-      'name',
-      'host',
-      'username',
-      'password',
-      'database',
-    ];
-
-    try {
-      sensitiveFields.forEach((field) => {
-        const value = cluster[field];
-        if (typeof value === 'string' && value !== '') {
-          const parts = value.split(':');
-          if (parts.length === 3) {
-            (cluster as any)[field] = this.cryptographyService.decrypt(value);
-          }
+  /** Returns a decrypted copy; the entity loaded from the DB is never mutated. */
+  private decrypted(cluster: Cluster): Cluster {
+    const copy = this.repository.create({ ...cluster });
+    for (const field of SENSITIVE_FIELDS) {
+      const value = cluster[field];
+      if (typeof value === 'string' && ENCRYPTED_RE.test(value)) {
+        try {
+          copy[field] = this.cryptographyService.decrypt(value);
+        } catch {
+          throw new BadRequestException(
+            'Failed to unlock cluster credentials. Check DB_ENCRYPTION_KEY.',
+          );
         }
-      });
-      return cluster;
-    } catch (error) {
-      throw new BadRequestException(
-        `Failed to unlock cluster credentials: ${error.message}`,
-      );
-    }
-  }
-
-  async testConnection(createClusterDto: CreateClusterDto) {
-    const { type, host, port, username, password, database } = createClusterDto;
-
-    if (type === ClusterType.MYSQL) {
-      try {
-        const connection = await mysql.createConnection({
-          host,
-          port,
-          user: username,
-          password,
-          database,
-          connectTimeout: 5000,
-          multipleStatements: true,
-        });
-        await connection.end();
-        return { success: true, message: 'MySQL connection successful!' };
-      } catch (error) {
-        throw new BadRequestException(
-          `MySQL connection failed: ${error.message}`,
-        );
-      }
-    } else if (type === ClusterType.POSTGRES) {
-      const client = new Client({
-        host,
-        port,
-        user: username,
-        password,
-        database,
-        connectionTimeoutMillis: 5000,
-      });
-      try {
-        await client.connect();
-        await client.end();
-        return { success: true, message: 'PostgreSQL connection successful!' };
-      } catch (error) {
-        throw new BadRequestException(
-          `PostgreSQL connection failed: ${error.message}`,
-        );
-      }
-    } else if (type === ClusterType.MSSQL) {
-      try {
-        const pool = await mssql.connect({
-          server: host,
-          port: port || 1433,
-          user: username,
-          password,
-          database,
-          options: { encrypt: true, trustServerCertificate: true },
-          connectionTimeout: 5000,
-        });
-        await pool.close();
-        return { success: true, message: 'MSSQL connection successful!' };
-      } catch (error) {
-        throw new BadRequestException(
-          `MSSQL connection failed: ${error.message}`,
-        );
-      }
-    } else if (type === ClusterType.SQLITE) {
-      try {
-        // host = file path; open and immediately close to verify accessibility
-        const db = new Database(host, { readonly: false });
-        db.pragma('journal_mode = WAL');
-        db.close();
-        return { success: true, message: 'SQLite connection successful!' };
-      } catch (error: any) {
-        throw new BadRequestException(
-          `SQLite connection failed: ${error.message}`,
-        );
       }
     }
-    throw new BadRequestException('Invalid database type!');
+    return copy;
   }
 
-  private async findClusterForConnection(id: string, userId: string) {
-    return this.findOne(id, userId);
+  private encryptFields(
+    values: Partial<Record<(typeof SENSITIVE_FIELDS)[number], unknown>>,
+  ) {
+    const out: Record<string, string | null> = {};
+    for (const field of SENSITIVE_FIELDS) {
+      const value = values[field];
+      if (value === undefined) continue;
+      out[field] =
+        value === null || value === ''
+          ? field === 'password'
+            ? null
+            : ''
+          : this.cryptographyService.encrypt(toText(value));
+    }
+    return out;
+  }
+
+  /**
+   * Loads the stored entity and re-encrypts any field that was saved in
+   * plaintext (an earlier bug wrote decrypted values back on update).
+   */
+  private async findRaw(id: string, userId: string): Promise<Cluster> {
+    const cluster = await super.findOne(id, userId);
+    const plain: Partial<Record<(typeof SENSITIVE_FIELDS)[number], string>> =
+      {};
+    for (const field of SENSITIVE_FIELDS) {
+      const value = cluster[field];
+      if (
+        typeof value === 'string' &&
+        value !== '' &&
+        !ENCRYPTED_RE.test(value)
+      ) {
+        plain[field] = value;
+      }
+    }
+    if (Object.keys(plain).length > 0) {
+      const fixed = this.encryptFields(plain);
+      await this.repository.update({ id: cluster.id }, fixed as any);
+      Object.assign(cluster, fixed);
+    }
+    return cluster;
+  }
+
+  private target(cluster: Cluster): ConnectionTarget {
+    return {
+      id: cluster.id,
+      userId: cluster.userId,
+      type: cluster.type,
+      host: cluster.host,
+      port: cluster.port,
+      username: cluster.username ?? '',
+      password: cluster.password ?? null,
+      database: cluster.database ?? '',
+      sslMode: cluster.sslMode ?? 'prefer',
+      isLocal: !!cluster.isLocal,
+      agentConnection: cluster.agentConnection ?? null,
+    };
+  }
+
+  async connectionFor(id: string, userId: string) {
+    const cluster = this.decrypted(await this.findRaw(id, userId));
+    return {
+      cluster,
+      target: this.target(cluster),
+      dialect: dialectFor(cluster.type),
+    };
   }
 
   async findAll(userId: string): Promise<Cluster[]> {
     const clusters = await super.findAll(userId);
-    return clusters.map((c) => this.decryptCluster(c));
+    return clusters.map((c) => this.decrypted(c));
   }
 
   async findOne(id: string, userId: string): Promise<Cluster> {
-    const cluster = await super.findOne(id, userId);
-    return this.decryptCluster(cluster);
+    return this.decrypted(await this.findRaw(id, userId));
   }
 
-  async create(userId: string, createClusterDto: CreateClusterDto) {
-    const isLocal = createClusterDto.isLocal ?? false;
-    if (!isLocal) {
-      await this.testConnection(createClusterDto);
+  private validateShape(dto: Partial<CreateClusterDto>) {
+    if (dto.type === ClusterType.SQLITE && !dto.isLocal) {
+      throw new BadRequestException(
+        'SQLite files must be opened through the local agent. Enable "Local database".',
+      );
     }
-    const cluster = this.repository.create({
-      ...createClusterDto,
-      isLocal,
-      name: this.cryptographyService.encrypt(createClusterDto.name) as string,
-      host: this.cryptographyService.encrypt(createClusterDto.host) as string,
-      username: this.cryptographyService.encrypt(
-        createClusterDto.username,
-      ) as string,
-      password:
-        this.cryptographyService.encrypt(createClusterDto.password) ??
-        undefined,
-      database: this.cryptographyService.encrypt(
-        createClusterDto.database,
-      ) as string,
+    if (dto.agentConnection && !dto.isLocal) {
+      throw new BadRequestException(
+        'Agent connections are only used by local clusters.',
+      );
+    }
+    if (!dto.agentConnection && !(dto.host ?? '').trim()) {
+      throw new BadRequestException('Host is required.');
+    }
+  }
+
+  private toTarget(
+    dto: Partial<CreateClusterDto>,
+    userId: string,
+    id = 'connection-test',
+  ): ConnectionTarget {
+    return {
+      id,
       userId,
+      type: dto.type!,
+      host: (dto.host ?? '').trim(),
+      port: dto.port ?? 0,
+      username: dto.username ?? '',
+      password: dto.password ?? null,
+      database: dto.database ?? '',
+      sslMode: dto.sslMode ?? 'prefer',
+      isLocal: !!dto.isLocal,
+      agentConnection: dto.agentConnection || null,
+    };
+  }
+
+  /** Tests the connection; local clusters are tested only if the agent is online. */
+  private async tryConnect(t: ConnectionTarget, requireAgent: boolean) {
+    try {
+      await this.executor.test(t);
+    } catch (error) {
+      if (
+        t.isLocal &&
+        !requireAgent &&
+        /not connected/i.test((error as Error).message)
+      ) {
+        return;
+      }
+      throw new BadRequestException(
+        `${t.type} connection failed: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  async testConnection(dto: CreateClusterDto, userId: string) {
+    this.validateShape(dto);
+    await this.tryConnect(this.toTarget(dto, userId), true);
+    return { success: true, message: 'Connection successful!' };
+  }
+
+  async create(userId: string, dto: CreateClusterDto) {
+    this.validateShape(dto);
+    await this.tryConnect(this.toTarget(dto, userId), false);
+    // With an agent connection, the host and credentials stay on the agent.
+    const viaAgent = !!dto.agentConnection;
+    const cluster = this.repository.create({
+      type: dto.type,
+      environment: dto.environment,
+      color: dto.color,
+      port: viaAgent ? 0 : (dto.port ?? 0),
+      isLocal: !!dto.isLocal,
+      sslMode: dto.sslMode ?? 'prefer',
+      agentConnection: dto.agentConnection || null,
+      userId,
+      ...(this.encryptFields({
+        name: dto.name,
+        host: viaAgent ? '' : dto.host?.trim(),
+        username: viaAgent ? '' : (dto.username ?? ''),
+        password: viaAgent ? null : dto.password,
+        database: viaAgent ? '' : (dto.database ?? ''),
+      }) as Partial<Cluster>),
     });
     const saved = await this.repository.save(cluster);
-    return this.decryptCluster(saved);
+    return this.decrypted(saved);
   }
 
-  async updateCluster(
-    id: string,
-    userId: string,
-    updates: Partial<CreateClusterDto>,
-  ) {
-    const cluster = await this.findOne(id, userId);
-    const encryptable = [
-      'name',
-      'host',
-      'username',
-      'password',
-      'database',
-    ] as const;
-    for (const field of encryptable) {
-      if (updates[field] !== undefined && updates[field] !== '') {
-        (updates as any)[field] = this.cryptographyService.encrypt(
-          updates[field] as string,
-        );
-      }
+  async updateCluster(id: string, userId: string, dto: UpdateClusterDto) {
+    const current = this.decrypted(await this.findRaw(id, userId));
+    const updates: Partial<CreateClusterDto> = {};
+    for (const [key, value] of Object.entries(dto)) {
+      if (value === undefined) continue;
+      if (key === 'password' && value === '') continue; // empty = keep current
+      (updates as any)[key] = value;
     }
-    Object.assign(cluster, updates);
-    const saved = await this.repository.save(cluster);
-    return this.decryptCluster(saved);
+    if (updates.agentConnection) {
+      // Moving to an agent connection: forget the credentials stored here.
+      Object.assign(updates, {
+        host: '',
+        username: '',
+        password: null,
+        database: '',
+        port: 0,
+      });
+    }
+    const merged = { ...current, ...updates } as Partial<CreateClusterDto>;
+    this.validateShape(merged);
+
+    if (
+      CONNECTION_FIELDS.some((f) => f in updates && updates[f] !== current[f])
+    ) {
+      await this.tryConnect(this.toTarget(merged, userId, id), false);
+    }
+
+    const { name, host, username, password, database, ...rest } = updates;
+    await this.repository.update({ id, userId }, {
+      ...rest,
+      ...this.encryptFields({ name, host, username, password, database }),
+    } as any);
+    await this.executor.invalidate(id);
+    return this.findOne(id, userId);
+  }
+
+  async remove(id: string, userId: string) {
+    const cluster = await super.findOne(id, userId);
+    await this.queryLogRepo.delete({ clusterId: id });
+    await this.repository.remove(cluster);
+    await this.executor.invalidate(id);
+  }
+
+  // ─── Metadata ────────────────────────────────────────────────────────────
+
+  private async loadColumns(
+    t: ConnectionTarget,
+    dialect: Dialect,
+    table?: string,
+  ): Promise<ColumnInfo[]> {
+    const stmt = dialect.columnsQuery(table);
+    const { rows } = await this.executor.run(t, stmt.sql, stmt.params);
+    return rows.map((r) => dialect.normalizeColumn(r));
+  }
+
+  async tableColumns(t: ConnectionTarget, dialect: Dialect, table: string) {
+    if (typeof table !== 'string' || table === '') {
+      throw new BadRequestException('Table name is required.');
+    }
+    const columns = await this.loadColumns(t, dialect, table);
+    if (columns.length === 0)
+      throw new NotFoundException(`Table '${table}' not found!`);
+    return columns;
+  }
+
+  async schemaFor(t: ConnectionTarget, dialect: Dialect) {
+    return this.loadColumns(t, dialect);
+  }
+
+  async indexesFor(
+    t: ConnectionTarget,
+    dialect: Dialect,
+    table?: string,
+  ): Promise<IndexInfo[]> {
+    const stmt = dialect.indexesQuery(table);
+    const { rows } = await this.executor.run(t, stmt.sql, stmt.params);
+    return rows.map((r) => dialect.normalizeIndex(r));
+  }
+
+  async foreignKeysFor(
+    t: ConnectionTarget,
+    dialect: Dialect,
+    table?: string,
+  ): Promise<ForeignKeyInfo[]> {
+    const stmt = dialect.foreignKeysQuery(table);
+    const { rows } = await this.executor.run(t, stmt.sql, stmt.params);
+    return rows.map((r) => dialect.normalizeForeignKey(r));
   }
 
   async findTables(id: string, userId: string) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    const { type, database } = cluster;
-
-    if (cluster.isLocal) {
-      let sql: string;
-      let params: any[] = [];
-      if (type === ClusterType.MYSQL) {
-        sql =
-          'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ? ORDER BY table_name ASC';
-        params = [database, 'BASE TABLE'];
-      } else if (type === ClusterType.POSTGRES) {
-        sql =
-          "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name ASC";
-      } else {
-        sql = `SELECT TABLE_NAME as name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_CATALOG = @database ORDER BY TABLE_NAME ASC`;
-        return (await this.executeViaAgent(cluster, sql, [], { database }))
-          .rows;
-      }
-      const { rows } = await this.executeViaAgent(cluster, sql, params);
-      return rows.map((row: any) => ({
-        name: row.TABLE_NAME || row.table_name,
-      }));
-    }
-
-    if (type === ClusterType.MYSQL) {
-      const pool = this.getMySQLPool(cluster);
-      const [rows]: [any[], any] = await pool.query(
-        'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ? ORDER BY table_name ASC',
-        [database, 'BASE TABLE'],
-      );
-      return rows.map((row: any) => ({
-        name: row.TABLE_NAME || row.table_name,
-      }));
-    } else if (type === ClusterType.POSTGRES) {
-      const pool = this.getPGPool(cluster);
-      const res = await pool.query(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name ASC",
-      );
-      return res.rows.map((row: any) => ({ name: row.table_name }));
-    } else if (type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const result = await pool
-        .request()
-        .input('database', mssql.VarChar, database).query(`
-        SELECT TABLE_NAME as name FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_CATALOG = @database
-        ORDER BY TABLE_NAME ASC
-      `);
-      return result.recordset;
-    } else if (type === ClusterType.SQLITE) {
-      return this.runSQLite(cluster, (db) => {
-        const rows = db
-          .prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC",
-          )
-          .all() as { name: string }[];
-        return rows.map((r) => ({ name: r.name }));
-      });
-    }
-  }
-
-  private async validateTableExists(cluster: Cluster, tableName: string) {
-    const { type, database } = cluster;
-
-    if (cluster.isLocal) {
-      let sql: string;
-      let params: any[] = [];
-      let namedParams: Record<string, any> = {};
-      if (type === ClusterType.MYSQL) {
-        sql =
-          'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_name = ?';
-        params = [database, tableName];
-      } else if (type === ClusterType.POSTGRES) {
-        sql =
-          "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)";
-        params = [tableName];
-      } else {
-        sql =
-          'SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @tableName AND TABLE_CATALOG = @database';
-        namedParams = { tableName, database };
-      }
-      const { rows } = await this.executeViaAgent(
-        cluster,
-        sql,
-        params,
-        namedParams,
-      );
-      const exists =
-        type === ClusterType.POSTGRES ? rows[0]?.exists : rows.length > 0;
-      if (!exists)
-        throw new BadRequestException(`Table '${tableName}' not found!`);
-      return;
-    }
-
-    if (type === ClusterType.MYSQL) {
-      const pool = this.getMySQLPool(cluster);
-      const [rows]: [any[], any] = await pool.query(
-        'SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_name = ?',
-        [database, tableName],
-      );
-      if (rows.length === 0)
-        throw new BadRequestException(`Table '${tableName}' not found!`);
-    } else if (type === ClusterType.POSTGRES) {
-      const pool = this.getPGPool(cluster);
-      const res = await pool.query(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)",
-        [tableName],
-      );
-      if (!res.rows[0].exists)
-        throw new BadRequestException(`Table '${tableName}' not found!`);
-    } else if (type === ClusterType.SQLITE) {
-      const exists = await this.runSQLite(cluster, (db) => {
-        const row = db
-          .prepare(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-          )
-          .get(tableName);
-        return !!row;
-      });
-      if (!exists)
-        throw new BadRequestException(`Table '${tableName}' not found!`);
-    } else if (type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const result = await pool
-        .request()
-        .input('tableName', mssql.VarChar, tableName)
-        .input('database', mssql.VarChar, database)
-        .query(
-          'SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = @tableName AND TABLE_CATALOG = @database',
-        );
-      if (result.recordset.length === 0)
-        throw new BadRequestException(`Table '${tableName}' not found!`);
-    }
+    const { target, dialect } = await this.connectionFor(id, userId);
+    const stmt = dialect.tablesQuery();
+    const { rows } = await this.executor.run(target, stmt.sql, stmt.params);
+    return rows.map((r) => ({
+      name: String(r.name ?? r.NAME ?? r.TABLE_NAME),
+    }));
   }
 
   async findTableColumns(id: string, userId: string, tableName: string) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    const { type, database } = cluster;
-    await this.validateTableExists(cluster, tableName);
-
-    if (cluster.isLocal) {
-      let sql: string;
-      let params: any[] = [];
-      let namedParams: Record<string, any> = {};
-      if (type === ClusterType.MYSQL) {
-        sql = `SELECT cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.COLUMN_TYPE as fullType, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, cols.COLUMN_KEY as columnKey, fk.referencedTable, fk.referencedColumn
-               FROM information_schema.columns cols
-               LEFT JOIN (SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME as referencedTable, REFERENCED_COLUMN_NAME as referencedColumn FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME) fk
-               ON cols.TABLE_SCHEMA = fk.TABLE_SCHEMA AND cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
-               WHERE cols.table_schema = ? AND cols.table_name = ? ORDER BY cols.ORDINAL_POSITION`;
-        params = [database, tableName];
-      } else if (type === ClusterType.POSTGRES) {
-        sql = `SELECT DISTINCT ON (cols.ordinal_position) cols.column_name as name, cols.data_type as type, cols.is_nullable as nullable, cols.column_default as "defaultValue", cols.udt_name as "udtName", (SELECT string_agg(enumlabel, ',') FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = cols.udt_name) as "enumValues", kcu.referenced_table_name as "referencedTable", kcu.referenced_column_name as "referencedColumn"
-               FROM information_schema.columns cols
-               LEFT JOIN (SELECT kcu.table_name, kcu.column_name, ccu.table_name AS referenced_table_name, ccu.column_name AS referenced_column_name FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY') kcu
-               ON cols.table_name = kcu.table_name AND cols.column_name = kcu.column_name
-               WHERE cols.table_schema = 'public' AND cols.table_name = $1 ORDER BY cols.ordinal_position`;
-        params = [tableName];
-      } else {
-        sql = `SELECT cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, fk.referencedTable, fk.referencedColumn
-               FROM INFORMATION_SCHEMA.COLUMNS cols
-               LEFT JOIN (SELECT fk.name AS constraint_name, OBJECT_NAME(fk.parent_object_id) AS TABLE_NAME, col.name AS COLUMN_NAME, OBJECT_NAME(fk.referenced_object_id) AS referencedTable, ref_col.name AS referencedColumn FROM sys.foreign_keys AS fk INNER JOIN sys.foreign_key_columns AS fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.columns AS col ON fkc.parent_object_id = col.object_id AND fkc.parent_column_id = col.column_id INNER JOIN sys.columns AS ref_col ON fkc.referenced_object_id = ref_col.object_id AND fkc.referenced_column_id = ref_col.column_id) fk
-               ON cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
-               WHERE cols.TABLE_NAME = @tableName AND cols.TABLE_CATALOG = @database ORDER BY cols.ORDINAL_POSITION`;
-        namedParams = { tableName, database };
-      }
-      return (await this.executeViaAgent(cluster, sql, params, namedParams))
-        .rows;
-    }
-
-    if (type === ClusterType.MYSQL) {
-      const [rows]: [any[], any] = await this.getMySQLPool(cluster).query(
-        `SELECT cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.COLUMN_TYPE as fullType, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, cols.COLUMN_KEY as columnKey, fk.referencedTable, fk.referencedColumn
-         FROM information_schema.columns cols
-         LEFT JOIN (SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME as referencedTable, REFERENCED_COLUMN_NAME as referencedColumn FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME) fk 
-         ON cols.TABLE_SCHEMA = fk.TABLE_SCHEMA AND cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
-         WHERE cols.table_schema = ? AND cols.table_name = ? ORDER BY cols.ORDINAL_POSITION`,
-        [database, tableName],
-      );
-      return rows;
-    } else if (type === ClusterType.POSTGRES) {
-      const res = await this.getPGPool(cluster).query(
-        `SELECT DISTINCT ON (cols.ordinal_position) cols.column_name as name, cols.data_type as type, cols.is_nullable as nullable, cols.column_default as "defaultValue", cols.udt_name as "udtName", (SELECT string_agg(enumlabel, ',') FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = cols.udt_name) as "enumValues", kcu.referenced_table_name as "referencedTable", kcu.referenced_column_name as "referencedColumn"
-         FROM information_schema.columns cols
-         LEFT JOIN (SELECT kcu.table_name, kcu.column_name, ccu.table_name AS referenced_table_name, ccu.column_name AS referenced_column_name FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY') kcu 
-         ON cols.table_name = kcu.table_name AND cols.column_name = kcu.column_name
-         WHERE cols.table_schema = 'public' AND cols.table_name = $1 ORDER BY cols.ordinal_position`,
-        [tableName],
-      );
-      return res.rows;
-    } else if (type === ClusterType.SQLITE) {
-      return this.runSQLite(cluster, (db) => {
-        const rows = db
-          .prepare(
-            `PRAGMA table_info(${this.escapeIdentifier(tableName, ClusterType.SQLITE)})`,
-          )
-          .all() as any[];
-        return rows.map((r) => ({
-          name: r.name,
-          type: r.type,
-          nullable: r.notnull ? 'NO' : 'YES',
-          defaultValue: r.dflt_value,
-          columnKey: r.pk ? 'PRI' : '',
-        }));
-      });
-    } else if (type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const result = await pool
-        .request()
-        .input('tableName', mssql.VarChar, tableName)
-        .input('database', mssql.VarChar, database)
-        .query(`SELECT cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, fk.referencedTable, fk.referencedColumn
-                FROM INFORMATION_SCHEMA.COLUMNS cols
-                LEFT JOIN (SELECT fk.name AS constraint_name, OBJECT_NAME(fk.parent_object_id) AS TABLE_NAME, col.name AS COLUMN_NAME, OBJECT_NAME(fk.referenced_object_id) AS referencedTable, ref_col.name AS referencedColumn FROM sys.foreign_keys AS fk INNER JOIN sys.foreign_key_columns AS fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.columns AS col ON fkc.parent_object_id = col.object_id AND fkc.parent_column_id = col.column_id INNER JOIN sys.columns AS ref_col ON fkc.referenced_object_id = ref_col.object_id AND fkc.referenced_column_id = ref_col.column_id) fk
-                ON cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
-                WHERE cols.TABLE_NAME = @tableName AND cols.TABLE_CATALOG = @database ORDER BY cols.ORDINAL_POSITION`);
-      return result.recordset;
-    }
+    const { target, dialect } = await this.connectionFor(id, userId);
+    return this.tableColumns(target, dialect, tableName);
   }
 
   async getSchema(id: string, userId: string) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    const { type, database } = cluster;
+    const { target, dialect } = await this.connectionFor(id, userId);
+    return this.schemaFor(target, dialect);
+  }
 
-    if (cluster.isLocal) {
-      let sql: string;
-      let params: any[] = [];
-      let namedParams: Record<string, any> = {};
-      if (type === ClusterType.MYSQL) {
-        sql = `SELECT cols.TABLE_NAME as tableName, cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.COLUMN_TYPE as fullType, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, cols.COLUMN_KEY as columnKey, fk.referencedTable, fk.referencedColumn
-               FROM information_schema.columns cols
-               LEFT JOIN (SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME as referencedTable, REFERENCED_COLUMN_NAME as referencedColumn FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME) fk
-               ON cols.TABLE_SCHEMA = fk.TABLE_SCHEMA AND cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
-               WHERE cols.table_schema = ?`;
-        params = [database];
-      } else if (type === ClusterType.POSTGRES) {
-        sql = `SELECT DISTINCT ON (cols.table_name, cols.ordinal_position) cols.table_name as "tableName", cols.column_name as name, cols.data_type as type, cols.is_nullable as nullable, cols.column_default as "defaultValue", cols.udt_name as "udtName", kcu.referenced_table_name as "referencedTable", kcu.referenced_column_name as "referencedColumn"
-               FROM information_schema.columns cols
-               LEFT JOIN (SELECT kcu.table_name, kcu.column_name, ccu.table_name AS referenced_table_name, ccu.column_name AS referenced_column_name FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY') kcu
-               ON cols.table_name = kcu.table_name AND cols.column_name = kcu.column_name
-               WHERE cols.table_schema = 'public' ORDER BY cols.table_name, cols.ordinal_position`;
-      } else {
-        sql = `SELECT cols.TABLE_NAME as tableName, cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, fk.referencedTable, fk.referencedColumn
-               FROM INFORMATION_SCHEMA.COLUMNS cols
-               LEFT JOIN (SELECT fk.name AS constraint_name, OBJECT_NAME(fk.parent_object_id) AS TABLE_NAME, col.name AS COLUMN_NAME, OBJECT_NAME(fk.referenced_object_id) AS referencedTable, ref_col.name AS referencedColumn FROM sys.foreign_keys AS fk INNER JOIN sys.foreign_key_columns AS fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.columns AS col ON fkc.parent_object_id = col.object_id AND fkc.parent_column_id = col.column_id INNER JOIN sys.columns AS ref_col ON fkc.referenced_object_id = ref_col.object_id AND fkc.referenced_column_id = ref_col.column_id) fk
-               ON cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
-               WHERE cols.TABLE_CATALOG = @database ORDER BY cols.TABLE_NAME, cols.ORDINAL_POSITION`;
-        namedParams = { database };
-      }
-      return (await this.executeViaAgent(cluster, sql, params, namedParams))
-        .rows;
-    }
+  // ─── Row access ──────────────────────────────────────────────────────────
 
-    if (type === ClusterType.MYSQL) {
-      const [rows]: [any[], any] = await this.getMySQLPool(cluster).query(
-        `SELECT cols.TABLE_NAME as tableName, cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.COLUMN_TYPE as fullType, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, cols.COLUMN_KEY as columnKey, fk.referencedTable, fk.referencedColumn
-         FROM information_schema.columns cols
-         LEFT JOIN (SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME as referencedTable, REFERENCED_COLUMN_NAME as referencedColumn FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME) fk 
-         ON cols.TABLE_SCHEMA = fk.TABLE_SCHEMA AND cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
-         WHERE cols.table_schema = ?`,
-        [database],
-      );
-      return rows;
-    } else if (type === ClusterType.POSTGRES) {
-      const res = await this.getPGPool(cluster).query(
-        `SELECT DISTINCT ON (cols.table_name, cols.ordinal_position) cols.table_name as "tableName", cols.column_name as name, cols.data_type as type, cols.is_nullable as nullable, cols.column_default as "defaultValue", cols.udt_name as "udtName", kcu.referenced_table_name as "referencedTable", kcu.referenced_column_name as "referencedColumn"
-         FROM information_schema.columns cols
-         LEFT JOIN (SELECT kcu.table_name, kcu.column_name, ccu.table_name AS referenced_table_name, ccu.column_name AS referenced_column_name FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON kcu.constraint_name = tc.constraint_name JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name WHERE tc.constraint_type = 'FOREIGN KEY') kcu 
-         ON cols.table_name = kcu.table_name AND cols.column_name = kcu.column_name
-         WHERE cols.table_schema = 'public' ORDER BY cols.table_name, cols.ordinal_position`,
-      );
-      return res.rows;
-    } else if (type === ClusterType.SQLITE) {
-      return this.runSQLite(cluster, (db) => {
-        const tables = db
-          .prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC",
-          )
-          .all() as { name: string }[];
-        const schema: any[] = [];
-        for (const table of tables) {
-          const cols = db
-            .prepare(
-              `PRAGMA table_info(${this.escapeIdentifier(table.name, ClusterType.SQLITE)})`,
-            )
-            .all() as any[];
-          for (const c of cols) {
-            schema.push({
-              tableName: table.name,
-              name: c.name,
-              type: c.type,
-              nullable: c.notnull ? 'NO' : 'YES',
-              defaultValue: c.dflt_value,
-              columnKey: c.pk ? 'PRI' : '',
-            });
-          }
+  private columnMap(columns: ColumnInfo[]) {
+    return new Map(columns.map((c) => [c.name, c]));
+  }
+
+  private requireColumn(map: Map<string, ColumnInfo>, name: string) {
+    const column = map.get(name);
+    if (!column) throw new BadRequestException(`Unknown column "${name}".`);
+    return column;
+  }
+
+  private buildFilters(
+    t: ConnectionTarget,
+    dialect: Dialect,
+    columns: ColumnInfo[],
+    filters: Filter[],
+  ): Clause {
+    const map = this.columnMap(columns);
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    const kinds: (ValueKind | null)[] = [];
+    const add = (value: unknown, kind: ValueKind | null) => {
+      params.push(value);
+      kinds.push(kind);
+      return dialect.param(params.length);
+    };
+
+    for (const f of Array.isArray(filters) ? filters : []) {
+      if (!f || typeof f !== 'object') continue;
+      const column = this.requireColumn(map, String(f.column));
+      const q = dialect.quote(column.name);
+      const raw = f.value;
+      switch (f.operator) {
+        case 'is_null':
+          clauses.push(`${q} IS NULL`);
+          break;
+        case 'is_not_null':
+          clauses.push(`${q} IS NOT NULL`);
+          break;
+        case 'contains':
+        case 'not_contains':
+        case 'starts_with':
+        case 'ends_with': {
+          const s = toText(raw);
+          const pattern =
+            f.operator === 'starts_with'
+              ? `${s}%`
+              : f.operator === 'ends_with'
+                ? `%${s}`
+                : `%${s}%`;
+          clauses.push(
+            dialect.like(
+              column,
+              add(pattern, 'text'),
+              f.operator === 'not_contains',
+            ),
+          );
+          break;
         }
-        return schema;
-      });
-    } else if (type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const result = await pool
-        .request()
-        .input('database', mssql.VarChar, database)
-        .query(`SELECT cols.TABLE_NAME as tableName, cols.COLUMN_NAME as name, cols.DATA_TYPE as type, cols.IS_NULLABLE as nullable, cols.COLUMN_DEFAULT as defaultValue, fk.referencedTable, fk.referencedColumn
-                FROM INFORMATION_SCHEMA.COLUMNS cols
-                LEFT JOIN (SELECT fk.name AS constraint_name, OBJECT_NAME(fk.parent_object_id) AS TABLE_NAME, col.name AS COLUMN_NAME, OBJECT_NAME(fk.referenced_object_id) AS referencedTable, ref_col.name AS referencedColumn FROM sys.foreign_keys AS fk INNER JOIN sys.foreign_key_columns AS fkc ON fk.object_id = fkc.constraint_object_id INNER JOIN sys.columns AS col ON fkc.parent_object_id = col.object_id AND fkc.parent_column_id = col.column_id INNER JOIN sys.columns AS ref_col ON fkc.referenced_object_id = ref_col.object_id AND fkc.referenced_column_id = ref_col.column_id) fk
-                ON cols.TABLE_NAME = fk.TABLE_NAME AND cols.COLUMN_NAME = fk.COLUMN_NAME
-                WHERE cols.TABLE_CATALOG = @database ORDER BY cols.TABLE_NAME, cols.ORDINAL_POSITION`);
-      return result.recordset;
+        case 'is':
+        case 'is_not':
+        case 'gt':
+        case 'lt': {
+          const value =
+            column.kind === 'json'
+              ? toText(raw)
+              : coerceValue(t.type, column, raw);
+          if (value === null) {
+            if (f.operator === 'is') clauses.push(`${q} IS NULL`);
+            else if (f.operator === 'is_not') clauses.push(`${q} IS NOT NULL`);
+            else
+              throw new BadRequestException(
+                `A value is required to filter "${column.name}".`,
+              );
+            break;
+          }
+          const ph = add(value, column.kind);
+          if (f.operator === 'is') clauses.push(dialect.equals(column, ph));
+          else if (f.operator === 'is_not')
+            clauses.push(`NOT (${dialect.equals(column, ph)})`);
+          else clauses.push(`${q} ${f.operator === 'gt' ? '>' : '<'} ${ph}`);
+          break;
+        }
+        default:
+          throw new BadRequestException(
+            `Unsupported filter operator "${String(f.operator)}".`,
+          );
+      }
     }
+    return {
+      sql: clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '',
+      params,
+      kinds,
+    };
   }
 
-  private escapeIdentifier(identifier: string, type: ClusterType): string {
-    if (type === ClusterType.MYSQL) {
-      return `\`${identifier.replaceAll('`', '``')}\``;
-    } else {
-      return `"${identifier.replaceAll('"', '""')}"`;
+  /** WHERE for identifying rows; `coversKey` tells if it pins one row by PK. */
+  private buildWhere(
+    t: ConnectionTarget,
+    dialect: Dialect,
+    columns: ColumnInfo[],
+    where: Record<string, unknown>,
+    startAt: number,
+  ): Clause & { coversKey: boolean } {
+    if (
+      !where ||
+      typeof where !== 'object' ||
+      Array.isArray(where) ||
+      Object.keys(where).length === 0
+    ) {
+      throw new BadRequestException(
+        'A non-empty "where" is required to identify the row.',
+      );
     }
+    const map = this.columnMap(columns);
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    const kinds: (ValueKind | null)[] = [];
+    for (const [name, raw] of Object.entries(where)) {
+      const column = this.requireColumn(map, name);
+      const value = coerceValue(t.type, column, raw);
+      if (value === null) {
+        clauses.push(dialect.equals(column, null));
+      } else {
+        params.push(value);
+        kinds.push(column.kind);
+        clauses.push(
+          dialect.equals(column, dialect.param(startAt + params.length - 1)),
+        );
+      }
+    }
+    const pk = columns.filter((c) => c.columnKey === 'PRI');
+    const coversKey =
+      pk.length > 0 &&
+      pk.every((c) => where[c.name] !== undefined && where[c.name] !== null);
+    return { sql: clauses.join(' AND '), params, kinds, coversKey };
   }
 
-  private sanitizeType(type: string): string {
-    // Column types are untrusted from source DB but should only contain safe characters
-    // (alphanumeric, spaces, parentheses, commas for size/scale)
-    return type.replaceAll(/[^a-zA-Z0-9\s(),]/g, '');
+  private buildValues(
+    t: ConnectionTarget,
+    columns: ColumnInfo[],
+    data: Record<string, unknown>,
+  ) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new BadRequestException('Row data must be an object.');
+    }
+    const map = this.columnMap(columns);
+    const names: string[] = [];
+    const params: unknown[] = [];
+    const kinds: (ValueKind | null)[] = [];
+    for (const [name, raw] of Object.entries(data)) {
+      if (raw === undefined) continue;
+      const column = this.requireColumn(map, name);
+      if (column.isGenerated) {
+        throw new BadRequestException(
+          `Column "${name}" is generated and can't be set.`,
+        );
+      }
+      names.push(name);
+      params.push(coerceValue(t.type, column, raw));
+      kinds.push(column.kind);
+    }
+    return { names, params, kinds };
   }
 
   async findTableData(
     id: string,
     userId: string,
     tableName: string,
-    page: number = 1,
-    limit: number = 100,
-    filters: any[] = [],
+    page = 1,
+    limit = 100,
+    filters: Filter[] = [],
   ) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    await this.validateTableExists(cluster, tableName);
-    const offset = (page - 1) * limit;
-    const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
+    const { target, dialect } = await this.connectionFor(id, userId);
+    const columns = await this.tableColumns(target, dialect, tableName);
+    const safePage = Math.max(1, Math.floor(Number(page) || 1));
+    const safeLimit = Math.min(
+      MAX_PAGE_SIZE,
+      Math.max(1, Math.floor(Number(limit) || 100)),
+    );
+    const where = this.buildFilters(target, dialect, columns, filters);
+    const orderBy = columns
+      .filter((c) => c.columnKey === 'PRI')
+      .map((c) => dialect.quote(c.name))
+      .join(', ');
+    const table = dialect.qualify(tableRef(columns));
+    const paging = dialect.pageClause({
+      orderBy,
+      limit: safeLimit,
+      offset: (safePage - 1) * safeLimit,
+    });
 
-    if (cluster.isLocal) {
-      const { where, params, namedParams } = this.buildWhereClauseForAgent(
-        cluster.type,
-        filters,
-      );
-      let sql: string;
-      if (cluster.type === ClusterType.MSSQL) {
-        sql = `SELECT * FROM ${escapedTableName}${where} ORDER BY (SELECT NULL) OFFSET @__offset ROWS FETCH NEXT @__limit ROWS ONLY`;
-        const dataResult = await this.executeViaAgent(cluster, sql, [], {
-          ...namedParams,
-          __offset: offset,
-          __limit: limit,
-        });
-        const countSql = `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`;
-        const countResult = await this.executeViaAgent(
-          cluster,
-          countSql,
-          [],
-          namedParams,
-        );
-        return {
-          data: dataResult.rows,
-          total: countResult.rows[0]?.total ?? 0,
-          page,
-          limit,
-        };
-      } else if (cluster.type === ClusterType.POSTGRES) {
-        sql = `SELECT * FROM ${escapedTableName}${where} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-        const dataResult = await this.executeViaAgent(cluster, sql, [
-          ...params,
-          limit,
-          offset,
-        ]);
-        const countSql = `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`;
-        const countResult = await this.executeViaAgent(
-          cluster,
-          countSql,
-          params,
-        );
-        return {
-          data: dataResult.rows,
-          total: Number.parseInt(countResult.rows[0]?.total ?? '0'),
-          page,
-          limit,
-        };
-      } else {
-        sql = `SELECT * FROM ${escapedTableName}${where} LIMIT ? OFFSET ?`;
-        const dataResult = await this.executeViaAgent(cluster, sql, [
-          ...params,
-          limit,
-          offset,
-        ]);
-        const countSql = `SELECT COUNT(*) as total FROM ${escapedTableName}${where}`;
-        const countResult = await this.executeViaAgent(
-          cluster,
-          countSql,
-          params,
-        );
-        return {
-          data: dataResult.rows,
-          total: countResult.rows[0]?.total ?? 0,
-          page,
-          limit,
-        };
-      }
-    }
-
-    switch (cluster.type) {
-      case ClusterType.MYSQL:
-        return this.runFindMySQL(
-          cluster,
-          escapedTableName,
-          filters,
-          page,
-          limit,
-          offset,
-        );
-      case ClusterType.POSTGRES:
-        return this.runFindPostgres(
-          cluster,
-          escapedTableName,
-          filters,
-          page,
-          limit,
-          offset,
-        );
-      case ClusterType.MSSQL:
-        return this.runFindMSSQL(
-          cluster,
-          escapedTableName,
-          filters,
-          page,
-          limit,
-          offset,
-        );
-      case ClusterType.SQLITE:
-        return this.runFindSQLite(
-          cluster,
-          escapedTableName,
-          filters,
-          page,
-          limit,
-          offset,
-        );
-      default:
-        throw new Error(`Unsupported cluster type: ${cluster.type}`);
-    }
-  }
-
-  private async runFindMySQL(
-    cluster: Cluster,
-    escapedTableName: string,
-    filters: any[],
-    page: number,
-    limit: number,
-    offset: number,
-  ) {
-    const { where, params } = this.buildWhereClause(ClusterType.MYSQL, filters);
-    const sql = ['SELECT * FROM', escapedTableName, where, 'LIMIT ? OFFSET ?']
-      .filter(Boolean)
-      .join(' ');
-
-    const pool = this.getMySQLPool(cluster);
-    const [rows] = await pool.query(sql, [
-      ...params,
-      Number(limit),
-      Number(offset),
+    const [data, count] = await Promise.all([
+      this.executor.run(
+        target,
+        `SELECT ${dialect.selectList(columns)} FROM ${table}${where.sql}${paging}`,
+        where.params,
+        where.kinds,
+      ),
+      this.executor.run(
+        target,
+        `SELECT COUNT(*) AS total FROM ${table}${where.sql}`,
+        where.params,
+        where.kinds,
+      ),
     ]);
-
-    const countSql = ['SELECT COUNT(*) as total FROM', escapedTableName, where]
-      .filter(Boolean)
-      .join(' ');
-    const [count]: any = await pool.query(countSql, params);
-    return { data: rows, total: count[0].total, page, limit };
-  }
-
-  private async runFindPostgres(
-    cluster: Cluster,
-    escapedTableName: string,
-    filters: any[],
-    page: number,
-    limit: number,
-    offset: number,
-  ) {
-    const { where, params } = this.buildWhereClause(
-      ClusterType.POSTGRES,
-      filters,
-    );
-    const sql = [
-      'SELECT * FROM',
-      escapedTableName,
-      where,
-      `LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-    ]
-      .filter(Boolean)
-      .join(' ');
-
-    const pool = this.getPGPool(cluster);
-    const res = await pool.query(sql, [...params, limit, offset]);
-
-    const countSql = ['SELECT COUNT(*) as total FROM', escapedTableName, where]
-      .filter(Boolean)
-      .join(' ');
-    const count = await pool.query(countSql, params);
     return {
-      data: res.rows,
-      total: Number.parseInt(count.rows[0].total),
-      page,
-      limit,
+      data: data.rows,
+      total: Number(count.rows[0]?.total ?? 0),
+      page: safePage,
+      limit: safeLimit,
     };
-  }
-
-  private async runFindMSSQL(
-    cluster: Cluster,
-    escapedTableName: string,
-    filters: any[],
-    page: number,
-    limit: number,
-    offset: number,
-  ) {
-    const pool = await this.getMSSQLPool(cluster);
-    const request = pool.request();
-    const { where } = this.buildWhereClause(
-      ClusterType.MSSQL,
-      filters,
-      request,
-    );
-    request.input('offset', mssql.Int, offset);
-    request.input('limit', mssql.Int, limit);
-
-    const sql = [
-      'SELECT * FROM',
-      escapedTableName,
-      where,
-      'ORDER BY (SELECT NULL) OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY;',
-      'SELECT COUNT(*) as total FROM',
-      escapedTableName,
-      where + ';',
-    ]
-      .filter(Boolean)
-      .join(' ');
-
-    const result = await request.query(sql);
-    const recordsets = result.recordsets as any;
-    return {
-      data: recordsets[0],
-      total: recordsets[1][0].total,
-      page,
-      limit,
-    };
-  }
-
-  private async runFindSQLite(
-    cluster: Cluster,
-    escapedTableName: string,
-    filters: any[],
-    page: number,
-    limit: number,
-    offset: number,
-  ) {
-    const { where, params } = this.buildWhereClause(
-      ClusterType.SQLITE,
-      filters,
-    );
-    return this.runSQLite(cluster, (db) => {
-      const rows = db
-        .prepare(`SELECT * FROM ${escapedTableName}${where} LIMIT ? OFFSET ?`)
-        .all([...params, limit, offset]);
-      const total = (
-        db
-          .prepare(`SELECT COUNT(*) as total FROM ${escapedTableName}${where}`)
-          .get(params) as any
-      ).total;
-      return { data: rows, total, page, limit };
-    });
-  }
-
-  // Like buildWhereClause but for agent queries — MSSQL named params go into namedParams object
-  private buildWhereClauseForAgent(
-    type: ClusterType,
-    filters: any[],
-  ): { where: string; params: any[]; namedParams: Record<string, any> } {
-    if (!filters || filters.length === 0)
-      return { where: '', params: [], namedParams: {} };
-    const params: any[] = [];
-    const namedParams: Record<string, any> = {};
-    const clauses = filters.map((f, i) => {
-      const { column, operator, value } = f;
-      let op = '';
-      let val = value;
-      const col = this.escapeIdentifier(column, type);
-      switch (operator) {
-        case 'is':
-          op = '=';
-          break;
-        case 'is_not':
-          op = '!=';
-          break;
-        case 'contains':
-          op = 'LIKE';
-          val = `%${value}%`;
-          break;
-        case 'not_contains':
-          op = 'NOT LIKE';
-          val = `%${value}%`;
-          break;
-        case 'starts_with':
-          op = 'LIKE';
-          val = `${value}%`;
-          break;
-        case 'ends_with':
-          op = 'LIKE';
-          val = `%${value}`;
-          break;
-        case 'gt':
-          op = '>';
-          break;
-        case 'lt':
-          op = '<';
-          break;
-        case 'is_null':
-          return `${col} IS NULL`;
-        case 'is_not_null':
-          return `${col} IS NOT NULL`;
-        default:
-          op = '=';
-      }
-      if (type === ClusterType.MSSQL) {
-        namedParams[`f${i}`] = val;
-        return `${col} ${op} @f${i}`;
-      } else if (type === ClusterType.POSTGRES) {
-        params.push(val);
-        return `${col} ${op} $${params.length}`;
-      } else {
-        params.push(val);
-        return `${col} ${op} ?`;
-      }
-    });
-    return { where: ' WHERE ' + clauses.join(' AND '), params, namedParams };
-  }
-
-  private buildWhereClause(
-    type: ClusterType,
-    filters: any[],
-    request?: mssql.Request,
-  ) {
-    if (!filters || filters.length === 0) return { where: '', params: [] };
-    const params: any[] = [];
-    const clauses = filters.map((f, i) => {
-      const { column, operator, value } = f;
-      let op = '';
-      let val = value;
-      const col = this.escapeIdentifier(column, type);
-
-      switch (operator) {
-        case 'is':
-          op = '=';
-          break;
-        case 'is_not':
-          op = '!=';
-          break;
-        case 'contains':
-          op = 'LIKE';
-          val = `%${value}%`;
-          break;
-        case 'not_contains':
-          op = 'NOT LIKE';
-          val = `%${value}%`;
-          break;
-        case 'starts_with':
-          op = 'LIKE';
-          val = `${value}%`;
-          break;
-        case 'ends_with':
-          op = 'LIKE';
-          val = `%${value}`;
-          break;
-        case 'gt':
-          op = '>';
-          break;
-        case 'lt':
-          op = '<';
-          break;
-        case 'is_null':
-          return `${col} IS NULL`;
-        case 'is_not_null':
-          return `${col} IS NOT NULL`;
-        default:
-          op = '=';
-      }
-
-      if (type === ClusterType.MSSQL && request) {
-        request.input(`f${i}`, val);
-        return `${col} ${op} @f${i}`;
-      } else if (type === ClusterType.POSTGRES) {
-        params.push(val);
-        return `${col} ${op} $${params.length}`;
-      } else {
-        params.push(val);
-        return `${col} ${op} ?`;
-      }
-    });
-
-    return { where: ' WHERE ' + clauses.join(' AND '), params };
-  }
-
-  async updateTableData(
-    id: string,
-    userId: string,
-    tableName: string,
-    data: any,
-    where: any,
-  ) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    await this.validateTableExists(cluster, tableName);
-    const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
-
-    if (cluster.isLocal) {
-      const type = cluster.type;
-      if (type === ClusterType.MSSQL) {
-        const namedParams: Record<string, any> = {};
-        const set = Object.keys(data)
-          .map((k, i) => {
-            namedParams[`v${i}`] = data[k];
-            return `${this.escapeIdentifier(k, type)} = @v${i}`;
-          })
-          .join(', ');
-        const cond = Object.keys(where)
-          .map((k, i) => {
-            namedParams[`c${i}`] = where[k];
-            return `${this.escapeIdentifier(k, type)} = @c${i}`;
-          })
-          .join(' AND ');
-        const { rowCount } = await this.executeViaAgent(
-          cluster,
-          `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
-          [],
-          namedParams,
-        );
-        return rowCount;
-      } else if (type === ClusterType.POSTGRES) {
-        const set = Object.keys(data)
-          .map((k, i) => `${this.escapeIdentifier(k, type)} = $${i + 1}`)
-          .join(', ');
-        const cond = Object.keys(where)
-          .map(
-            (k, i) =>
-              `${this.escapeIdentifier(k, type)} = $${Object.keys(data).length + i + 1}`,
-          )
-          .join(' AND ');
-        const { rowCount } = await this.executeViaAgent(
-          cluster,
-          `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
-          [...Object.values(data), ...Object.values(where)],
-        );
-        return rowCount;
-      } else {
-        const set = Object.keys(data)
-          .map((k) => `${this.escapeIdentifier(k, type)} = ?`)
-          .join(', ');
-        const cond = Object.keys(where)
-          .map((k) => `${this.escapeIdentifier(k, type)} = ?`)
-          .join(' AND ');
-        const { rowCount } = await this.executeViaAgent(
-          cluster,
-          `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
-          [...Object.values(data), ...Object.values(where)],
-        );
-        return rowCount;
-      }
-    }
-
-    switch (cluster.type) {
-      case ClusterType.MYSQL:
-        return this.runUpdateMySQL(cluster, escapedTableName, data, where);
-      case ClusterType.POSTGRES:
-        return this.runUpdatePostgres(cluster, escapedTableName, data, where);
-      case ClusterType.MSSQL:
-        return this.runUpdateMSSQL(cluster, escapedTableName, data, where);
-      case ClusterType.SQLITE:
-        return this.runSQLite(cluster, (db) => {
-          const set = Object.keys(data)
-            .map((k) => `${this.escapeIdentifier(k, ClusterType.SQLITE)} = ?`)
-            .join(', ');
-          const cond = Object.keys(where)
-            .map((k) => `${this.escapeIdentifier(k, ClusterType.SQLITE)} = ?`)
-            .join(' AND ');
-          const result = db
-            .prepare(`UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`)
-            .run([...Object.values(data), ...Object.values(where)]);
-          return result.changes;
-        });
-      default:
-        throw new Error(`Unsupported cluster type: ${cluster.type}`);
-    }
-  }
-
-  private async runUpdateMySQL(
-    cluster: Cluster,
-    escapedTableName: string,
-    data: any,
-    where: any,
-  ) {
-    const set = Object.keys(data)
-      .map((k) => `${this.escapeIdentifier(k, ClusterType.MYSQL)} = ?`)
-      .join(', ');
-    const cond = Object.keys(where)
-      .map((k) => `${this.escapeIdentifier(k, ClusterType.MYSQL)} = ?`)
-      .join(' AND ');
-    const [result] = await this.getMySQLPool(cluster).query(
-      `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
-      [...Object.values(data), ...Object.values(where)],
-    );
-    return result;
-  }
-
-  private async runUpdatePostgres(
-    cluster: Cluster,
-    escapedTableName: string,
-    data: any,
-    where: any,
-  ) {
-    const set = Object.keys(data)
-      .map(
-        (k, i) =>
-          `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${i + 1}`,
-      )
-      .join(', ');
-    const cond = Object.keys(where)
-      .map(
-        (k, i) =>
-          `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${Object.keys(data).length + i + 1}`,
-      )
-      .join(' AND ');
-    const res = await this.getPGPool(cluster).query(
-      `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
-      [...Object.values(data), ...Object.values(where)],
-    );
-    return res.rowCount;
-  }
-
-  private async runUpdateMSSQL(
-    cluster: Cluster,
-    escapedTableName: string,
-    data: any,
-    where: any,
-  ) {
-    const pool = await this.getMSSQLPool(cluster);
-    const req = pool.request();
-    const set = Object.keys(data)
-      .map((k, i) => {
-        req.input(`v${i}`, data[k]);
-        return `${this.escapeIdentifier(k, ClusterType.MSSQL)} = @v${i}`;
-      })
-      .join(', ');
-    const cond = Object.keys(where)
-      .map((k, i) => {
-        req.input(`c${i}`, where[k]);
-        return `${this.escapeIdentifier(k, ClusterType.MSSQL)} = @c${i}`;
-      })
-      .join(' AND ');
-    const result = await req.query(
-      `UPDATE ${escapedTableName} SET ${set} WHERE ${cond}`,
-    );
-    return result.rowsAffected[0];
   }
 
   async insertTableData(
     id: string,
     userId: string,
     tableName: string,
-    data: any,
+    data: Record<string, unknown>,
   ) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    await this.validateTableExists(cluster, tableName);
-    const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
+    const { target, dialect } = await this.connectionFor(id, userId);
+    const columns = await this.tableColumns(target, dialect, tableName);
+    const values = this.buildValues(target, columns, data);
+    const pk = columns.filter((c) => c.columnKey === 'PRI');
 
-    if (cluster.isLocal) {
-      const type = cluster.type;
-      const keys = Object.keys(data);
-      const cols = keys.map((k) => this.escapeIdentifier(k, type)).join(', ');
-      if (type === ClusterType.MSSQL) {
-        const namedParams: Record<string, any> = {};
-        const placeholders = keys
-          .map((k, i) => {
-            namedParams[`v${i}`] = data[k];
-            return `@v${i}`;
-          })
-          .join(', ');
-        const { rows } = await this.executeViaAgent(
-          cluster,
-          `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}); SELECT SCOPE_IDENTITY() as id;`,
-          [],
-          namedParams,
-        );
-        return rows[0];
-      } else if (type === ClusterType.POSTGRES) {
-        const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
-        const { rows } = await this.executeViaAgent(
-          cluster,
-          `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}) RETURNING *`,
-          Object.values(data),
-        );
-        return rows[0];
-      } else {
-        const placeholders = keys.map(() => '?').join(', ');
-        return this.executeViaAgent(
-          cluster,
-          `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`,
-          Object.values(data),
-        );
+    if (target.type === ClusterType.MYSQL) {
+      const res = await this.executor.run(
+        target,
+        dialect.insert(tableRef(columns), values.names, false),
+        values.params,
+        values.kinds,
+      );
+      // Read the row back so the client sees defaults and the generated key.
+      const key: Record<string, unknown> = {};
+      for (const c of pk) {
+        if (data[c.name] !== undefined && data[c.name] !== null)
+          key[c.name] = data[c.name];
+        else if (c.isAutoIncrement && res.insertId) key[c.name] = res.insertId;
       }
+      if (pk.length > 0 && Object.keys(key).length === pk.length) {
+        const w = this.buildWhere(target, dialect, columns, key, 1);
+        const { rows } = await this.executor.run(
+          target,
+          `SELECT * FROM ${dialect.qualify(tableRef(columns))} WHERE ${w.sql} LIMIT 1`,
+          w.params,
+          w.kinds,
+        );
+        if (rows[0]) return rows[0];
+      }
+      return { ...data };
     }
 
-    switch (cluster.type) {
-      case ClusterType.MYSQL:
-        return this.runInsertMySQL(cluster, escapedTableName, data);
-      case ClusterType.POSTGRES:
-        return this.runInsertPostgres(cluster, escapedTableName, data);
-      case ClusterType.MSSQL:
-        return this.runInsertMSSQL(cluster, escapedTableName, data);
-      case ClusterType.SQLITE:
-        return this.runSQLite(cluster, (db) => {
-          const keys = Object.keys(data);
-          const cols = keys
-            .map((k) => this.escapeIdentifier(k, ClusterType.SQLITE))
-            .join(', ');
-          const placeholders = keys.map(() => '?').join(', ');
-          const result = db
-            .prepare(
-              `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`,
-            )
-            .run(Object.values(data));
-          return { id: result.lastInsertRowid, ...data };
-        });
-      default:
-        throw new Error(`Unsupported cluster type: ${cluster.type}`);
+    try {
+      const { rows } = await this.executor.run(
+        target,
+        dialect.insert(tableRef(columns), values.names, true),
+        values.params,
+        values.kinds,
+      );
+      return rows[0] ?? { ...data };
+    } catch (error) {
+      // SQL Server rejects OUTPUT on tables with triggers; insert without it.
+      if (
+        target.type === ClusterType.MSSQL &&
+        /OUTPUT clause/i.test((error as Error).message)
+      ) {
+        await this.executor.run(
+          target,
+          dialect.insert(tableRef(columns), values.names, false),
+          values.params,
+          values.kinds,
+        );
+        return { ...data };
+      }
+      throw new BadRequestException((error as Error).message);
     }
   }
 
-  private async runInsertMySQL(
-    cluster: Cluster,
-    escapedTableName: string,
-    data: any,
+  async updateTableData(
+    id: string,
+    userId: string,
+    tableName: string,
+    data: Record<string, unknown>,
+    where: Record<string, unknown>,
   ) {
-    const keys = Object.keys(data);
-    const cols = keys
-      .map((k) => this.escapeIdentifier(k, ClusterType.MYSQL))
+    const { target, dialect } = await this.connectionFor(id, userId);
+    const columns = await this.tableColumns(target, dialect, tableName);
+    const values = this.buildValues(target, columns, data);
+    if (values.names.length === 0)
+      throw new BadRequestException('Nothing to update.');
+    const set = values.names
+      .map((n, i) => `${dialect.quote(n)} = ${dialect.param(i + 1)}`)
       .join(', ');
-    const placeholders = keys.map(() => '?').join(', ');
-    const [result] = await this.getMySQLPool(cluster).query(
-      `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders})`,
-      Object.values(data),
+    const w = this.buildWhere(
+      target,
+      dialect,
+      columns,
+      where,
+      values.params.length + 1,
     );
-    return result;
-  }
+    const sql = w.coversKey
+      ? `UPDATE ${dialect.qualify(tableRef(columns))} SET ${set} WHERE ${w.sql}`
+      : dialect.updateOne(tableRef(columns), set, w.sql); // no unique key: touch one row only
 
-  private async runInsertPostgres(
-    cluster: Cluster,
-    escapedTableName: string,
-    data: any,
-  ) {
-    const keys = Object.keys(data);
-    const cols = keys
-      .map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES))
-      .join(', ');
-    const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
-    const res = await this.getPGPool(cluster).query(
-      `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}) RETURNING *`,
-      Object.values(data),
+    const { rowCount } = await this.executor.run(
+      target,
+      sql,
+      [...values.params, ...w.params],
+      [...values.kinds, ...w.kinds],
     );
-    return (res.rows as any)[0];
-  }
-
-  private async runInsertMSSQL(
-    cluster: Cluster,
-    escapedTableName: string,
-    data: any,
-  ) {
-    const pool = await this.getMSSQLPool(cluster);
-    const req = pool.request();
-    const cols = Object.keys(data)
-      .map((k) => this.escapeIdentifier(k, ClusterType.MSSQL))
-      .join(', ');
-    const placeholders = Object.keys(data)
-      .map((k, i) => {
-        req.input(`v${i}`, data[k]);
-        return `@v${i}`;
-      })
-      .join(', ');
-    const result = await req.query(
-      `INSERT INTO ${escapedTableName} (${cols}) VALUES (${placeholders}); SELECT SCOPE_IDENTITY() as id;`,
-    );
-    return result.recordset[0];
+    if (rowCount === 0) {
+      throw new NotFoundException(
+        'No matching row found. It may have been changed or deleted.',
+      );
+    }
+    return { affectedRows: rowCount };
   }
 
   async deleteTableData(
     id: string,
     userId: string,
     tableName: string,
-    where: any,
+    body: {
+      where?: Record<string, unknown>;
+      wheres?: Record<string, unknown>[];
+    },
   ) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    await this.validateTableExists(cluster, tableName);
-    const escapedTableName = this.escapeIdentifier(tableName, cluster.type);
+    const { target, dialect } = await this.connectionFor(id, userId);
+    const columns = await this.tableColumns(target, dialect, tableName);
+    const list = body?.wheres ?? (body?.where ? [body.where] : []);
+    if (list.length === 0) throw new BadRequestException('Nothing to delete.');
 
-    if (cluster.isLocal) {
-      const type = cluster.type;
-      if (type === ClusterType.MSSQL) {
-        const namedParams: Record<string, any> = {};
-        const cond = Object.keys(where)
-          .map((k, i) => {
-            namedParams[`c${i}`] = where[k];
-            return `${this.escapeIdentifier(k, type)} = @c${i}`;
-          })
-          .join(' AND ');
-        const { rowCount } = await this.executeViaAgent(
-          cluster,
-          `DELETE FROM ${escapedTableName} WHERE ${cond}`,
-          [],
-          namedParams,
+    const statements = list.map((where) => {
+      const w = this.buildWhere(target, dialect, columns, where, 1);
+      return {
+        sql: w.coversKey
+          ? `DELETE FROM ${dialect.qualify(tableRef(columns))} WHERE ${w.sql}`
+          : dialect.deleteOne(tableRef(columns), w.sql),
+        params: w.params,
+        paramKinds: w.kinds,
+      };
+    });
+
+    let affected = 0;
+    if (statements.length === 1) {
+      affected = (await this.executor.runStatement(target, statements[0]))
+        .rowCount;
+      if (affected === 0) {
+        throw new NotFoundException(
+          'No matching row found. It may have been changed or deleted.',
         );
-        return rowCount;
-      } else if (type === ClusterType.POSTGRES) {
-        const cond = Object.keys(where)
-          .map((k, i) => `${this.escapeIdentifier(k, type)} = $${i + 1}`)
-          .join(' AND ');
-        const { rowCount } = await this.executeViaAgent(
-          cluster,
-          `DELETE FROM ${escapedTableName} WHERE ${cond}`,
-          Object.values(where),
-        );
-        return rowCount;
-      } else {
-        const cond = Object.keys(where)
-          .map((k) => `${this.escapeIdentifier(k, type)} = ?`)
-          .join(' AND ');
-        const { rowCount } = await this.executeViaAgent(
-          cluster,
-          `DELETE FROM ${escapedTableName} WHERE ${cond}`,
-          Object.values(where),
-        );
-        return rowCount;
       }
+    } else {
+      const results = await this.executor.transaction(target, (tx) =>
+        tx.runMany(statements),
+      );
+      affected = results.reduce((sum, r) => sum + r.rowCount, 0);
     }
+    return { affectedRows: affected };
+  }
 
-    switch (cluster.type) {
-      case ClusterType.MYSQL:
-        return this.runDeleteMySQL(cluster, escapedTableName, where);
-      case ClusterType.POSTGRES:
-        return this.runDeletePostgres(cluster, escapedTableName, where);
-      case ClusterType.MSSQL:
-        return this.runDeleteMSSQL(cluster, escapedTableName, where);
-      case ClusterType.SQLITE:
-        return this.runSQLite(cluster, (db) => {
-          const cond = Object.keys(where)
-            .map((k) => `${this.escapeIdentifier(k, ClusterType.SQLITE)} = ?`)
-            .join(' AND ');
-          const result = db
-            .prepare(`DELETE FROM ${escapedTableName} WHERE ${cond}`)
-            .run(Object.values(where));
-          return result.changes;
-        });
-      default:
-        throw new Error(`Unsupported cluster type: ${cluster.type}`);
+  // ─── Destructive actions ─────────────────────────────────────────────────
+
+  /** Server-side "Destructive Action Lock" from Project Settings (on by default). */
+  async assertNotLocked(userId: string, what: string) {
+    const user = await this.userRepo.findOne({
+      where: { id: userId },
+      select: ['id', 'settings'],
+    });
+    if (user?.settings?.destructiveActionLock !== false) {
+      throw new ForbiddenException(
+        `${what} is blocked by the Destructive Action Lock. Turn it off in Project Settings to continue.`,
+      );
     }
   }
 
-  private async runDeleteMySQL(
-    cluster: Cluster,
-    escapedTableName: string,
-    where: any,
-  ) {
-    const cond = Object.keys(where)
-      .map((k) => `${this.escapeIdentifier(k, ClusterType.MYSQL)} = ?`)
-      .join(' AND ');
-    const [result] = await this.getMySQLPool(cluster).query(
-      `DELETE FROM ${escapedTableName} WHERE ${cond}`,
-      Object.values(where),
-    );
-    return result;
+  async dropTable(clusterId: string, userId: string, tableName: string) {
+    await this.assertNotLocked(userId, 'DROP TABLE');
+    const { target, dialect } = await this.connectionFor(clusterId, userId);
+    const columns = await this.tableColumns(target, dialect, tableName);
+    const sql = dialect.dropTable(tableRef(columns));
+    const started = Date.now();
+    try {
+      await this.executor.run(target, sql);
+      await this.log(clusterId, userId, sql, started, true, null);
+      return { success: true };
+    } catch (error) {
+      await this.log(
+        clusterId,
+        userId,
+        sql,
+        started,
+        false,
+        (error as Error).message,
+      );
+      throw new BadRequestException(
+        `Failed to drop table: ${(error as Error).message}`,
+      );
+    }
   }
 
-  private async runDeletePostgres(
-    cluster: Cluster,
-    escapedTableName: string,
-    where: any,
-  ) {
-    const cond = Object.keys(where)
-      .map(
-        (k, i) =>
-          `${this.escapeIdentifier(k, ClusterType.POSTGRES)} = $${i + 1}`,
-      )
-      .join(' AND ');
-    const res = await this.getPGPool(cluster).query(
-      `DELETE FROM ${escapedTableName} WHERE ${cond}`,
-      Object.values(where),
-    );
-    return res.rowCount;
-  }
+  // ─── Query editor ────────────────────────────────────────────────────────
 
-  private async runDeleteMSSQL(
-    cluster: Cluster,
-    escapedTableName: string,
-    where: any,
+  private async log(
+    clusterId: string,
+    userId: string,
+    query: string,
+    started: number,
+    success: boolean,
+    errorMessage: string | null,
   ) {
-    const pool = await this.getMSSQLPool(cluster);
-    const req = pool.request();
-    const cond = Object.keys(where)
-      .map((k, i) => {
-        req.input(`c${i}`, where[k]);
-        return `${this.escapeIdentifier(k, ClusterType.MSSQL)} = @c${i}`;
-      })
-      .join(' AND ');
-    const result = await req.query(
-      `DELETE FROM ${escapedTableName} WHERE ${cond}`,
-    );
-    return result.rowsAffected[0];
+    try {
+      await this.queryLogRepo.save({
+        query,
+        clusterId,
+        userId,
+        executionTimeMs: Date.now() - started,
+        success,
+        errorMessage: errorMessage ?? undefined,
+      });
+    } catch {
+      // Logging must never hide the query's own result.
+    }
   }
 
   async executeQuery(
@@ -1432,234 +800,48 @@ export class ClustersService extends UserOwnedService<Cluster> {
     page?: number,
     limit?: number,
   ) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    const startTime = Date.now();
+    if (typeof query !== 'string' || query.trim() === '') {
+      throw new BadRequestException('Query is empty.');
+    }
+    const { target } = await this.connectionFor(id, userId);
+    const destructive = findDestructiveStatements(query, target.type);
+    if (destructive.length > 0) {
+      await this.assertNotLocked(userId, destructive.join(', '));
+    }
 
-    const { execQuery, usePagination, baseQuery } = this.prepareQueryParams(
-      query,
-      cluster,
-      page,
-      limit,
-    );
-
-    let success = true;
-    let errorMessage = null;
-    let results: any = null;
-    let totals: number[] = [];
-
+    const started = Date.now();
     try {
-      const resp = await this.runDatabaseQuery(
-        cluster,
-        execQuery,
-        usePagination,
-        baseQuery,
-      );
-      results = resp.results;
-      totals = resp.totals;
-    } catch (error) {
-      success = false;
-      errorMessage = error.message;
-      throw new BadRequestException(error.message);
-    } finally {
-      await this.queryLogRepo.save({
-        query,
-        clusterId: id,
-        userId,
-        executionTimeMs: Date.now() - startTime,
-        success,
-        errorMessage,
-      });
-    }
-
-    return { results, totals, executionTimeMs: Date.now() - startTime };
-  }
-
-  private prepareQueryParams(
-    query: string,
-    cluster: Cluster,
-    page?: number,
-    limit?: number,
-  ) {
-    const trimmedQuery = query.trim();
-    // Use a non-backtracking method for removing trailing semicolons (prevents ReDoS)
-    let end = trimmedQuery.length;
-    while (end > 0 && trimmedQuery[end - 1] === ';') {
-      end--;
-    }
-    const baseQuery = trimmedQuery.substring(0, end);
-    const isSelect = baseQuery.toUpperCase().startsWith('SELECT');
-    const isSingleQuery = !baseQuery.includes(';');
-    const usePagination = !!(page && limit && isSelect && isSingleQuery);
-
-    let execQuery = query;
-    if (usePagination) {
-      const offset = (page - 1) * limit;
-      if (
-        !Number.isInteger(offset) ||
-        !Number.isInteger(limit) ||
-        offset < 0 ||
-        limit < 0
-      ) {
-        throw new Error('Invalid input');
-      }
-      if (cluster.type === ClusterType.MSSQL) {
-        execQuery = `SELECT * FROM (${baseQuery}) AS __synq_sub ORDER BY (SELECT NULL) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
-      } else {
-        execQuery = `SELECT * FROM (${baseQuery}) AS __synq_sub LIMIT ${limit} OFFSET ${offset}`;
-      }
-    }
-
-    return { execQuery, usePagination, baseQuery };
-  }
-
-  private async runDatabaseQuery(
-    cluster: Cluster,
-    execQuery: string,
-    usePagination: boolean,
-    baseQuery: string,
-  ): Promise<{ results: any; totals: number[] }> {
-    if (cluster.isLocal) {
-      const { rows } = await this.executeViaAgent(cluster, execQuery);
-      const results = [rows];
+      let results: unknown[];
       let totals: number[];
-      if (usePagination) {
-        const safeBase = baseQuery.trim().replace(/;$/, '');
-        let countSql: string;
-        if (cluster.type === ClusterType.MSSQL) {
-          countSql = `SELECT COUNT(*) as total FROM (${safeBase}) AS __synq_count`;
-        } else {
-          countSql = `SELECT COUNT(*) as total FROM (${safeBase}) AS __synq_count`;
-        }
-        const countRes = await this.executeViaAgent(cluster, countSql);
-        totals = [Number(countRes.rows[0]?.total ?? 0)];
-      } else {
-        totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
-      }
-      return { results, totals };
-    }
-
-    switch (cluster.type) {
-      case ClusterType.MYSQL:
-        return this.runMySQL(cluster, execQuery, usePagination, baseQuery);
-      case ClusterType.POSTGRES:
-        return this.runPostgres(cluster, execQuery, usePagination, baseQuery);
-      case ClusterType.MSSQL:
-        return this.runMSSQL(cluster, execQuery, usePagination, baseQuery);
-      case ClusterType.SQLITE:
-        return this.runSQLiteQuery(
-          cluster,
-          execQuery,
-          usePagination,
-          baseQuery,
+      if (page && limit && isSingleRowQuery(query, target.type)) {
+        const sql = query.trim().replace(/;+\s*$/, '');
+        const res = await this.executor.runPage(
+          target,
+          sql,
+          (page - 1) * limit,
+          limit,
         );
-      default:
-        throw new Error(`Unsupported cluster type: ${cluster.type}`);
-    }
-  }
-
-  private async runSQLiteQuery(
-    cluster: Cluster,
-    execQuery: string,
-    usePagination: boolean,
-    baseQuery: string,
-  ) {
-    return this.runSQLite(cluster, (db) => {
-      const rows = db.prepare(execQuery).all();
-      const results = [rows];
-      let totals: number[];
-      if (usePagination) {
-        const safeBase = baseQuery.trim().replace(/;$/, '');
-        const countRow = db
-          .prepare(
-            `SELECT COUNT(*) as total FROM (${safeBase}) AS __synq_count`,
-          )
-          .get() as any;
-        totals = [Number(countRow?.total ?? 0)];
+        results = [res.rows];
+        totals = [res.total];
       } else {
-        totals = results.map((r) => (Array.isArray(r) ? r.length : 0));
+        const res = await this.executor.runScript(target, query);
+        results = res.results;
+        totals = res.rowCounts;
       }
-      return { results, totals };
-    });
-  }
-
-  private async runMySQL(
-    cluster: Cluster,
-    execQuery: string,
-    usePagination: boolean,
-    baseQuery: string,
-  ) {
-    const pool = this.getMySQLPool(cluster);
-    const [rows] = await pool.query(execQuery);
-    const results =
-      Array.isArray(rows) && rows.length > 0 && Array.isArray(rows[0])
-        ? rows
-        : [rows];
-
-    let totals = [];
-    if (usePagination) {
-      // We wrap the base query in a subquery to count the total matching rows.
-      // Semicolons are stripped to ensure the base query is valid as a sub-command.
-      const safeBaseQuery = baseQuery.trim().replace(/;$/, '');
-      const [countRes]: any = await pool.query(
-        `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`, // NOSONAR: safeBaseQuery is stripped and intentional for results counting
+      await this.log(id, userId, query, started, true, null);
+      return { results, totals, executionTimeMs: Date.now() - started };
+    } catch (error) {
+      await this.log(
+        id,
+        userId,
+        query,
+        started,
+        false,
+        (error as Error).message,
       );
-      totals = [countRes[0].total];
-    } else {
-      totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
+      if (error instanceof ForbiddenException) throw error;
+      throw new BadRequestException((error as Error).message);
     }
-    return { results, totals };
-  }
-
-  private async runPostgres(
-    cluster: Cluster,
-    execQuery: string,
-    usePagination: boolean,
-    baseQuery: string,
-  ) {
-    const pool = this.getPGPool(cluster);
-    const res = await pool.query(execQuery);
-    const results = Array.isArray(res)
-      ? res.map((r) => r.rows || [])
-      : [res.rows || []];
-
-    let totals = [];
-    if (usePagination) {
-      // Wrap base query in a subquery for total row count.
-      const safeBaseQuery = baseQuery.trim().replace(/;$/, '');
-      const countRes = await pool.query(
-        `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`, // NOSONAR: safeBaseQuery is stripped and intentional for results counting
-      );
-      totals = [Number.parseInt(countRes.rows[0].total)];
-    } else {
-      totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
-    }
-    return { results, totals };
-  }
-
-  private async runMSSQL(
-    cluster: Cluster,
-    execQuery: string,
-    usePagination: boolean,
-    baseQuery: string,
-  ) {
-    const pool = await this.getMSSQLPool(cluster);
-    const result = await pool.request().query(execQuery);
-    const results =
-      Array.isArray(result.recordsets) && result.recordsets.length > 0
-        ? result.recordsets
-        : [result.recordset];
-
-    let totals = [];
-    if (usePagination) {
-      const safeBaseQuery = baseQuery.trim().replace(/;$/, '');
-      const countRes = await pool.request().query(
-        `SELECT COUNT(*) as total FROM (${safeBaseQuery}) AS __synq_count`, // NOSONAR: safeBaseQuery is stripped and intentional for results counting
-      );
-      totals = [countRes.recordset[0].total];
-    } else {
-      totals = results.map((r: any) => (Array.isArray(r) ? r.length : 0));
-    }
-    return { results, totals };
   }
 
   async getQueryLogs(clusterId: string, userId: string) {
@@ -1670,843 +852,128 @@ export class ClustersService extends UserOwnedService<Cluster> {
     });
   }
 
-  async remove(id: string, userId: string) {
-    const cluster = await this.findOne(id, userId);
-    await this.repository.remove(cluster);
-  }
+  // ─── Compare ─────────────────────────────────────────────────────────────
 
-  async dropTable(clusterId: string, userId: string, tableName: string) {
-    const cluster = await this.findOne(clusterId, userId);
-    if (!cluster) throw new Error('Cluster not found');
-
-    let sql = '';
-    if (cluster.type === ClusterType.MYSQL) {
-      sql = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.MYSQL)};`;
-    } else if (cluster.type === ClusterType.POSTGRES) {
-      sql = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} CASCADE;`;
-    } else if (cluster.type === ClusterType.MSSQL) {
-      sql = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.MSSQL)};`;
-    } else if (cluster.type === ClusterType.SQLITE) {
-      try {
-        await this.runSQLite(cluster, (db) => {
-          db.prepare(
-            `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.SQLITE)}`,
-          ).run();
-        });
-        return { success: true };
-      } catch (error: any) {
-        throw new Error(`Failed to drop table: ${error.message}`);
-      }
-    }
-
-    try {
-      await this.executeQuery(clusterId, userId, sql);
-      return { success: true };
-    } catch (error) {
-      throw new Error(`Failed to drop table: ${error.message}`);
-    }
-  }
-
-  async compareSchemas(sourceId: string, targetId: string, userId: string) {
-    const sourceSchema = await this.getSchema(sourceId, userId);
-    const targetSchema = await this.getSchema(targetId, userId);
-
-    const sourceTables = this.groupByTable(sourceSchema);
-    const targetTables = this.groupByTable(targetSchema);
-
-    const diffs: {
-      missingInTarget: any[];
-      missingInSource: any[];
-      tableMismatches: any[];
-      matchingTables: any[];
-    } = {
-      missingInTarget: [],
-      missingInSource: [],
-      tableMismatches: [],
-      matchingTables: [],
-    };
-
-    for (const tableName of Object.keys(sourceTables)) {
-      if (!targetTables[tableName]) {
-        diffs.missingInTarget.push({
-          tableName,
-          columns: sourceTables[tableName],
-        });
-      } else {
-        const tableDiff = this.compareTableColumns(
-          tableName,
-          sourceTables[tableName],
-          targetTables[tableName],
-        );
-        if (tableDiff.hasDiff) {
-          diffs.tableMismatches.push(tableDiff);
-        } else {
-          diffs.matchingTables.push({
-            tableName,
-            columns: sourceTables[tableName],
-          });
-        }
-      }
-    }
-
-    for (const tableName of Object.keys(targetTables)) {
-      if (!sourceTables[tableName]) {
-        diffs.missingInSource.push({
-          tableName,
-          columns: targetTables[tableName],
-        });
-      }
-    }
-
-    return diffs;
-  }
-
-  private groupByTable(schema: any[]) {
-    const tables: Record<string, any[]> = {};
-    schema.forEach((col) => {
-      const t = col.tableName || col.table_name;
-      if (!tables[t]) tables[t] = [];
-      tables[t].push(col);
-    });
+  groupByTable(schema: ColumnInfo[]) {
+    const tables: Record<string, ColumnInfo[]> = {};
+    for (const col of schema) (tables[col.tableName] ??= []).push(col);
     return tables;
   }
 
-  private compareTableColumns(
-    tableName: string,
-    sourceCols: any[],
-    targetCols: any[],
-  ) {
-    const diff: any = {
-      tableName,
-      hasDiff: false,
-      missingColumns: [],
-      typeMismatches: [],
+  /** Same engine: compare exact types. Different engines: compare value kinds. */
+  sameType(source: ColumnInfo, target: ColumnInfo, sameEngine: boolean) {
+    if (sameEngine)
+      return (
+        source.fullType.toLowerCase().trim() ===
+        target.fullType.toLowerCase().trim()
+      );
+    const loose = (k: ValueKind) =>
+      k === 'integer' || k === 'bigint'
+        ? 'int'
+        : k === 'datetimetz'
+          ? 'datetime'
+          : k;
+    return loose(source.kind) === loose(target.kind);
+  }
+
+  async compareSchemas(sourceId: string, targetId: string, userId: string) {
+    const src = await this.connectionFor(sourceId, userId);
+    const dst = await this.connectionFor(targetId, userId);
+    const sourceTables = this.groupByTable(
+      await this.schemaFor(src.target, src.dialect),
+    );
+    const targetTables = this.groupByTable(
+      await this.schemaFor(dst.target, dst.dialect),
+    );
+    const sameEngine = src.target.type === dst.target.type;
+    // Across engines without schemas, tables are matched by their bare name.
+    const schemaAware =
+      src.dialect.defaultSchema !== null && dst.dialect.defaultSchema !== null;
+    const targetByKey = new Map(
+      Object.values(targetTables).map((cols) => [
+        matchKey(dst.dialect, tableRef(cols), schemaAware),
+        cols,
+      ]),
+    );
+    const sourceKeys = new Set(
+      Object.values(sourceTables).map((cols) =>
+        matchKey(src.dialect, tableRef(cols), schemaAware),
+      ),
+    );
+
+    const diffs = {
+      missingInTarget: [] as { tableName: string; columns: ColumnInfo[] }[],
+      missingInSource: [] as { tableName: string; columns: ColumnInfo[] }[],
+      tableMismatches: [] as any[],
+      matchingTables: [] as { tableName: string; columns: ColumnInfo[] }[],
     };
 
-    const sourceColMap = new Map(sourceCols.map((c) => [c.name, c]));
-    const targetColMap = new Map(targetCols.map((c) => [c.name, c]));
-
-    sourceColMap.forEach((sCol, name) => {
-      const tCol = targetColMap.get(name);
-      if (!tCol) {
-        diff.missingColumns.push({ ...sCol, status: 'missing_in_target' });
-        diff.hasDiff = true;
-      } else if (
-        sCol.type.toLowerCase().trim() !== tCol.type.toLowerCase().trim()
-      ) {
-        diff.typeMismatches.push({
-          name,
-          sourceType: sCol.type,
-          targetType: tCol.type,
-        });
-        diff.hasDiff = true;
-      }
-    });
-
-    targetColMap.forEach((tCol, name) => {
-      if (!sourceColMap.has(name)) {
-        diff.missingColumns.push({ ...tCol, status: 'missing_in_source' });
-        diff.hasDiff = true;
-      }
-    });
-
-    return diff;
-  }
-
-  async syncSchema(
-    sourceId: string,
-    targetId: string,
-    userId: string,
-    tableNames: string[],
-    withData: boolean = false,
-  ) {
-    const sourceSchema = await this.getSchema(sourceId, userId);
-    const targetCluster = await this.findClusterForConnection(targetId, userId);
-    const sourceTables = this.groupByTable(sourceSchema);
-
-    const syncResults = [];
-    for (const tableName of tableNames) {
-      const columns = sourceTables[tableName];
-      if (!columns) continue;
-
-      const result = await this.syncSingleTable(
-        sourceId,
-        targetId,
-        userId,
-        tableName,
-        columns,
-        targetCluster.type,
-        withData,
+    for (const [tableName, columns] of Object.entries(sourceTables)) {
+      const other = targetByKey.get(
+        matchKey(src.dialect, tableRef(columns), schemaAware),
       );
-      syncResults.push(result);
-    }
-
-    return syncResults;
-  }
-
-  private async syncSingleTable(
-    sourceId: string,
-    targetId: string,
-    userId: string,
-    tableName: string,
-    columns: any[],
-    targetType: ClusterType,
-    withData: boolean,
-  ) {
-    const { dropDdl, createDdl } = this.getSyncDDL(
-      tableName,
-      columns,
-      targetType,
-    );
-    let success = true;
-    let error = null;
-
-    const targetCluster = await this.findClusterForConnection(targetId, userId);
-
-    try {
-      // PostgreSQL and MSSQL support transactional DDL — wrap DROP+CREATE+data
-      // in a single transaction so a failure doesn't leave a missing table.
-      // MySQL auto-commits DDL so we do a best-effort sequential approach.
-      if (targetType === ClusterType.POSTGRES) {
-        const pool = this.getPGPool(targetCluster);
-        const client = await pool.connect();
-        try {
-          await client.query('BEGIN');
-          if (dropDdl) await client.query(dropDdl);
-          if (createDdl) await client.query(createDdl);
-          if (withData && createDdl) {
-            const sourceData = await this.findTableData(
-              sourceId,
-              userId,
-              tableName,
-              1,
-              1000,
-            );
-            for (const row of sourceData?.data ?? []) {
-              const keys = Object.keys(row);
-              const cols = keys
-                .map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES))
-                .join(', ');
-              const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
-              await client.query(
-                `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} (${cols}) VALUES (${placeholders})`,
-                Object.values(row),
-              );
-            }
-          }
-          await client.query('COMMIT');
-        } catch (e) {
-          await client.query('ROLLBACK');
-          throw e;
-        } finally {
-          client.release();
+      if (!other) {
+        diffs.missingInTarget.push({ tableName, columns });
+        continue;
+      }
+      const targetMap = this.columnMap(other);
+      const sourceMap = this.columnMap(columns);
+      const missingColumns: any[] = [];
+      const typeMismatches: any[] = [];
+      for (const col of columns) {
+        const t = targetMap.get(col.name);
+        if (!t) missingColumns.push({ ...col, status: 'missing_in_target' });
+        else if (!this.sameType(col, t, sameEngine)) {
+          typeMismatches.push({
+            name: col.name,
+            sourceType: col.fullType,
+            targetType: t.fullType,
+          });
         }
-      } else if (targetType === ClusterType.MSSQL) {
-        const pool = await this.getMSSQLPool(targetCluster);
-        const transaction = new mssql.Transaction(pool);
-        await transaction.begin();
-        try {
-          if (dropDdl) await new mssql.Request(transaction).query(dropDdl);
-          if (createDdl) await new mssql.Request(transaction).query(createDdl);
-          if (withData && createDdl) {
-            const sourceData = await this.findTableData(
-              sourceId,
-              userId,
-              tableName,
-              1,
-              1000,
-            );
-            for (const row of sourceData?.data ?? []) {
-              const req = new mssql.Request(transaction);
-              const cols = Object.keys(row)
-                .map((k) => this.escapeIdentifier(k, ClusterType.MSSQL))
-                .join(', ');
-              const placeholders = Object.keys(row)
-                .map((k, i) => {
-                  req.input(`v${i}`, row[k]);
-                  return `@v${i}`;
-                })
-                .join(', ');
-              await req.query(
-                `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`,
-              );
-            }
-          }
-          await transaction.commit();
-        } catch (e) {
-          await transaction.rollback();
-          throw e;
-        }
+      }
+      for (const col of other) {
+        if (!sourceMap.has(col.name))
+          missingColumns.push({ ...col, status: 'missing_in_source' });
+      }
+      if (missingColumns.length || typeMismatches.length) {
+        diffs.tableMismatches.push({
+          tableName,
+          hasDiff: true,
+          missingColumns,
+          typeMismatches,
+        });
       } else {
-        // MySQL: DDL is auto-committed — run sequentially, best-effort
-        if (dropDdl) await this.executeQuery(targetId, userId, dropDdl);
-        if (createDdl) await this.executeQuery(targetId, userId, createDdl);
-        if (withData && createDdl) {
-          await this.syncTableData(sourceId, targetId, userId, tableName);
-        }
-      }
-    } catch (e) {
-      success = false;
-      error = e.message;
-    }
-
-    return { tableName, success, error };
-  }
-
-  private getSyncDDL(
-    tableName: string,
-    columns: any[],
-    targetType: ClusterType,
-  ) {
-    let dropDdl = '';
-    let createDdl = '';
-
-    if (targetType === ClusterType.MYSQL) {
-      dropDdl = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.MYSQL)};`;
-      createDdl = this.generateMySQLCreateTable(tableName, columns);
-    } else if (targetType === ClusterType.POSTGRES) {
-      dropDdl = `DROP TABLE IF EXISTS ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} CASCADE;`;
-      createDdl = this.generatePostgresCreateTable(tableName, columns);
-    }
-
-    return { dropDdl, createDdl };
-  }
-
-  private async syncTableData(
-    sourceId: string,
-    targetId: string,
-    userId: string,
-    tableName: string,
-  ) {
-    const sourceData = await this.findTableData(
-      sourceId,
-      userId,
-      tableName,
-      1,
-      1000,
-    );
-    if (!sourceData?.data) return;
-
-    for (const row of sourceData.data) {
-      await this.insertTableData(targetId, userId, tableName, row);
-    }
-  }
-
-  private generateMySQLCreateTable(tableName: string, columns: any[]) {
-    const colStrings = columns.map((c) => {
-      const colParts = [
-        this.escapeIdentifier(c.name, ClusterType.MYSQL),
-        this.sanitizeType(c.fullType || c.type),
-      ];
-
-      if (c.nullable === 'NO') colParts.push('NOT NULL');
-
-      if (c.defaultValue !== null && c.defaultValue !== undefined) {
-        const def = String(c.defaultValue).trim();
-        const upperDef = def.toUpperCase();
-
-        if (upperDef === 'NULL') {
-          colParts.push('DEFAULT NULL');
-        } else if (
-          upperDef === 'CURRENT_TIMESTAMP' ||
-          upperDef.includes('(') ||
-          upperDef.includes(')')
-        ) {
-          colParts.push(`DEFAULT ${def}`);
-        } else if (
-          (def.startsWith("'") && def.endsWith("'")) ||
-          !isNaN(Number(def))
-        ) {
-          colParts.push(`DEFAULT ${def}`);
-        } else {
-          colParts.push(`DEFAULT '${def.replaceAll("'", "''")}'`);
-        }
-      }
-
-      if (c.columnKey === 'PRI' || c.isPrimary) colParts.push('PRIMARY KEY');
-      return colParts.join(' ');
-    });
-
-    return [
-      'CREATE TABLE',
-      this.escapeIdentifier(tableName, ClusterType.MYSQL),
-      '(',
-      colStrings.join(',\n  '),
-      ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;',
-    ].join(' ');
-  }
-
-  private generatePostgresCreateTable(tableName: string, columns: any[]) {
-    const colStrings = columns.map((c) => {
-      const type = this.sanitizeType(
-        (c.udtName || c.type) === 'varchar' ? 'text' : c.udtName || c.type,
-      );
-      const colParts = [
-        this.escapeIdentifier(c.name, ClusterType.POSTGRES),
-        type,
-      ];
-
-      if (c.nullable === 'NO') colParts.push('NOT NULL');
-
-      if (c.defaultValue !== null && c.defaultValue !== undefined) {
-        const def = String(c.defaultValue).trim();
-        const upperDef = def.toUpperCase();
-
-        if (upperDef === 'NULL') {
-          colParts.push('DEFAULT NULL');
-        } else if (
-          !upperDef.includes('NEXTVAL') &&
-          !upperDef.includes('(') &&
-          !upperDef.includes(')')
-        ) {
-          if (!def.startsWith("'") && isNaN(Number(def))) {
-            colParts.push(`DEFAULT '${def.replaceAll("'", "''")}'`);
-          } else {
-            colParts.push(`DEFAULT ${def}`);
-          }
-        } else if (!upperDef.includes('NEXTVAL')) {
-          colParts.push(`DEFAULT ${def}`);
-        }
-      }
-      return colParts.join(' ');
-    });
-
-    return [
-      'CREATE TABLE',
-      this.escapeIdentifier(tableName, ClusterType.POSTGRES),
-      '(',
-      colStrings.join(',\n  '),
-      ');',
-    ].join(' ');
-  }
-
-  async backup(id: string, userId: string, format: 'sql' | 'csv' | 'json') {
-    const cluster = await this.findClusterForConnection(id, userId);
-    const tables = await this.findTables(id, userId);
-    const schema = await this.getSchema(id, userId);
-    const tableSchemas = this.groupByTable(schema);
-
-    if (format === 'sql') {
-      return {
-        content: await this.generateSQLBackup(
-          id,
-          userId,
-          cluster,
-          tables,
-          tableSchemas,
-        ),
-      };
-    }
-
-    const backupData: any = {};
-    for (const table of tables) {
-      const data = await this.findTableData(id, userId, table.name, 1, 5000);
-      if (format === 'json') {
-        backupData[table.name] = data?.data || [];
-      } else if (format === 'csv') {
-        backupData[table.name] = this.formatCSVData(data?.data || []);
+        diffs.matchingTables.push({ tableName, columns });
       }
     }
-
-    return backupData;
-  }
-
-  private async generateSQLBackup(
-    id: string,
-    userId: string,
-    cluster: Cluster,
-    tables: any[],
-    tableSchemas: any,
-  ) {
-    let sql = `-- SynqDB Backup\n-- Cluster: ${cluster.name}\n-- Date: ${new Date().toISOString()}\n\n`;
-
-    for (const table of tables) {
-      const columns = tableSchemas[table.name];
-      const data = await this.findTableData(id, userId, table.name, 1, 5000);
-
-      const ddl =
-        cluster.type === ClusterType.MYSQL
-          ? this.generateMySQLCreateTable(table.name, columns)
-          : this.generatePostgresCreateTable(table.name, columns);
-
-      sql += `${ddl}\n\n`;
-
-      if (data?.data?.length > 0) {
-        sql += this.formatSQLInsert(table.name, data.data, cluster.type);
-        sql += '\n';
-      }
-    }
-    return sql;
-  }
-
-  private formatSQLInsert(tableName: string, rows: any[], type: ClusterType) {
-    return rows
-      .map((row) => {
-        const keys = Object.keys(row);
-        const cols = keys.map((k) => this.escapeIdentifier(k, type)).join(', ');
-        const values = Object.values(row)
-          .map((v) => {
-            if (v === null) return 'NULL';
-            if (typeof v === 'string') return `'${v.replaceAll("'", "''")}'`;
-            if (v instanceof Date) return `'${v.toISOString()}'`;
-            return v;
-          })
-          .join(', ');
-        return `INSERT INTO ${this.escapeIdentifier(tableName, type)} (${cols}) VALUES (${values});`;
-      })
-      .join('\n');
-  }
-
-  private formatCSVData(data: any[]) {
-    if (!data || data.length === 0) return '';
-    const headers = Object.keys(data[0]);
-    const rows = data.map((row: any) =>
-      headers
-        .map((h) => {
-          const val = row[h];
-          if (val === null) return '';
-          const str = String(val);
-          return str.includes(',') || str.includes('"')
-            ? `"${str.replaceAll('"', '""')}"`
-            : str;
-        })
-        .join(','),
-    );
-    return [headers.join(','), ...rows].join('\n');
-  }
-
-  async restore(
-    id: string,
-    userId: string,
-    format: 'sql' | 'csv' | 'json',
-    data: any,
-  ) {
-    if (format === 'sql') return this.restoreSQL(id, userId, data.content);
-    if (format === 'json') return this.restoreJSON(id, userId, data);
-    if (format === 'csv') return this.restoreCSV(id, userId, data);
-  }
-
-  private async restoreSQL(id: string, userId: string, content: string) {
-    const queries = content
-      .split(';')
-      .map((q) => q.trim())
-      .filter((q) => q.length > 0);
-
-    const cluster = await this.findClusterForConnection(id, userId);
-
-    if (cluster.type === ClusterType.POSTGRES) {
-      const pool = this.getPGPool(cluster);
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        for (const query of queries) {
-          await client.query(query);
-        }
-        await client.query('COMMIT');
-      } catch (e) {
-        await client.query('ROLLBACK');
-        throw new BadRequestException(
-          `Restore failed and was rolled back: ${e.message}`,
-        );
-      } finally {
-        client.release();
-      }
-    } else if (cluster.type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const transaction = new mssql.Transaction(pool);
-      await transaction.begin();
-      try {
-        for (const query of queries) {
-          await new mssql.Request(transaction).query(query);
-        }
-        await transaction.commit();
-      } catch (e) {
-        await transaction.rollback();
-        throw new BadRequestException(
-          `Restore failed and was rolled back: ${e.message}`,
-        );
-      }
-    } else if (cluster.type === ClusterType.SQLITE) {
-      await this.runSQLite(cluster, (db) => {
-        const tx = db.transaction(() => {
-          for (const query of queries) {
-            db.prepare(query).run();
-          }
+    for (const [key, columns] of targetByKey) {
+      if (!sourceKeys.has(key))
+        diffs.missingInSource.push({
+          tableName: columns[0].tableName,
+          columns,
         });
-        try {
-          tx();
-        } catch (e: any) {
-          throw new BadRequestException(
-            `Restore failed and was rolled back: ${e.message}`,
-          );
-        }
-      });
-    } else {
-      // MySQL: run inside a single connection to leverage its transaction support
-      const conn = await this.getMySQLPool(cluster).getConnection();
-      try {
-        await conn.beginTransaction();
-        for (const query of queries) {
-          await conn.query(query);
-        }
-        await conn.commit();
-      } catch (e) {
-        await conn.rollback();
-        throw new BadRequestException(
-          `Restore failed and was rolled back: ${e.message}`,
-        );
-      } finally {
-        conn.release();
-      }
     }
-
-    return { success: true };
+    return diffs;
   }
 
-  private async restoreJSON(id: string, userId: string, data: any) {
-    const cluster = await this.findClusterForConnection(id, userId);
-
-    if (cluster.type === ClusterType.POSTGRES) {
-      const pool = this.getPGPool(cluster);
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        for (const tableName of Object.keys(data)) {
-          for (const row of data[tableName] as any[]) {
-            const keys = Object.keys(row);
-            const cols = keys
-              .map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES))
-              .join(', ');
-            const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
-            await client.query(
-              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} (${cols}) VALUES (${placeholders})`,
-              Object.values(row),
-            );
-          }
-        }
-        await client.query('COMMIT');
-      } catch (e) {
-        await client.query('ROLLBACK');
+  /** Coerces a row of normalized values for insertion into `columns`. */
+  rowValues(t: ConnectionTarget, columns: ColumnInfo[], row: Row) {
+    const map = this.columnMap(columns);
+    const names: string[] = [];
+    const params: unknown[] = [];
+    const kinds: (ValueKind | null)[] = [];
+    for (const [name, value] of Object.entries(row)) {
+      const column = map.get(name);
+      if (!column) {
         throw new BadRequestException(
-          `Restore failed and was rolled back: ${e.message}`,
-        );
-      } finally {
-        client.release();
-      }
-    } else if (cluster.type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const transaction = new mssql.Transaction(pool);
-      await transaction.begin();
-      try {
-        for (const tableName of Object.keys(data)) {
-          for (const row of data[tableName] as any[]) {
-            const req = new mssql.Request(transaction);
-            const cols = Object.keys(row)
-              .map((k) => this.escapeIdentifier(k, ClusterType.MSSQL))
-              .join(', ');
-            const placeholders = Object.keys(row)
-              .map((k, i) => {
-                req.input(`v${i}`, row[k]);
-                return `@v${i}`;
-              })
-              .join(', ');
-            await req.query(
-              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`,
-            );
-          }
-        }
-        await transaction.commit();
-      } catch (e) {
-        await transaction.rollback();
-        throw new BadRequestException(
-          `Restore failed and was rolled back: ${e.message}`,
+          `Column "${name}" does not exist in table "${columns[0]?.tableName}".`,
         );
       }
-    } else if (cluster.type === ClusterType.SQLITE) {
-      await this.runSQLite(cluster, (db) => {
-        const tx = db.transaction(() => {
-          for (const tableName of Object.keys(data)) {
-            for (const row of data[tableName] as any[]) {
-              const keys = Object.keys(row);
-              const cols = keys
-                .map((k) => this.escapeIdentifier(k, ClusterType.SQLITE))
-                .join(', ');
-              const placeholders = keys.map(() => '?').join(', ');
-              db.prepare(
-                `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.SQLITE)} (${cols}) VALUES (${placeholders})`,
-              ).run(Object.values(row));
-            }
-          }
-        });
-        try {
-          tx();
-        } catch (e: any) {
-          throw new BadRequestException(
-            `Restore failed and was rolled back: ${e.message}`,
-          );
-        }
-      });
-    } else {
-      const conn = await this.getMySQLPool(cluster).getConnection();
-      try {
-        await conn.beginTransaction();
-        for (const tableName of Object.keys(data)) {
-          for (const row of data[tableName] as any[]) {
-            const keys = Object.keys(row);
-            const cols = keys
-              .map((k) => this.escapeIdentifier(k, ClusterType.MYSQL))
-              .join(', ');
-            const placeholders = keys.map(() => '?').join(', ');
-            await conn.query(
-              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MYSQL)} (${cols}) VALUES (${placeholders})`,
-              Object.values(row),
-            );
-          }
-        }
-        await conn.commit();
-      } catch (e) {
-        await conn.rollback();
-        throw new BadRequestException(
-          `Restore failed and was rolled back: ${e.message}`,
-        );
-      } finally {
-        conn.release();
-      }
+      if (column.isGenerated) continue;
+      names.push(name);
+      params.push(coerceValue(t.type, column, value));
+      kinds.push(column.kind);
     }
-
-    return { success: true };
-  }
-
-  private async restoreCSV(id: string, userId: string, data: any) {
-    const cluster = await this.findClusterForConnection(id, userId);
-    const tableEntries = Object.keys(data).map((tableName) => {
-      const lines = (data[tableName] as string).split('\n');
-      if (lines.length < 2) return { tableName, rows: [] };
-      const headers = lines[0].split(',');
-      const rows = lines
-        .slice(1)
-        .filter(Boolean)
-        .map((line) => this.parseCSVRow(headers, line));
-      return { tableName, rows };
-    });
-
-    if (cluster.type === ClusterType.POSTGRES) {
-      const pool = this.getPGPool(cluster);
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        for (const { tableName, rows } of tableEntries) {
-          for (const row of rows) {
-            const keys = Object.keys(row);
-            const cols = keys
-              .map((k) => this.escapeIdentifier(k, ClusterType.POSTGRES))
-              .join(', ');
-            const placeholders = keys.map((_, i) => `$${i + 1}`).join(', ');
-            await client.query(
-              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.POSTGRES)} (${cols}) VALUES (${placeholders})`,
-              Object.values(row),
-            );
-          }
-        }
-        await client.query('COMMIT');
-      } catch (e) {
-        await client.query('ROLLBACK');
-        throw new BadRequestException(
-          `Restore failed and was rolled back: ${e.message}`,
-        );
-      } finally {
-        client.release();
-      }
-    } else if (cluster.type === ClusterType.MSSQL) {
-      const pool = await this.getMSSQLPool(cluster);
-      const transaction = new mssql.Transaction(pool);
-      await transaction.begin();
-      try {
-        for (const { tableName, rows } of tableEntries) {
-          for (const row of rows) {
-            const req = new mssql.Request(transaction);
-            const cols = Object.keys(row)
-              .map((k) => this.escapeIdentifier(k, ClusterType.MSSQL))
-              .join(', ');
-            const placeholders = Object.keys(row)
-              .map((k, i) => {
-                req.input(`v${i}`, row[k]);
-                return `@v${i}`;
-              })
-              .join(', ');
-            await req.query(
-              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MSSQL)} (${cols}) VALUES (${placeholders})`,
-            );
-          }
-        }
-        await transaction.commit();
-      } catch (e) {
-        await transaction.rollback();
-        throw new BadRequestException(
-          `Restore failed and was rolled back: ${e.message}`,
-        );
-      }
-    } else if (cluster.type === ClusterType.SQLITE) {
-      await this.runSQLite(cluster, (db) => {
-        const tx = db.transaction(() => {
-          for (const { tableName, rows } of tableEntries) {
-            for (const row of rows) {
-              const keys = Object.keys(row);
-              const cols = keys
-                .map((k) => this.escapeIdentifier(k, ClusterType.SQLITE))
-                .join(', ');
-              const placeholders = keys.map(() => '?').join(', ');
-              db.prepare(
-                `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.SQLITE)} (${cols}) VALUES (${placeholders})`,
-              ).run(Object.values(row));
-            }
-          }
-        });
-        try {
-          tx();
-        } catch (e: any) {
-          throw new BadRequestException(
-            `Restore failed and was rolled back: ${e.message}`,
-          );
-        }
-      });
-    } else {
-      const conn = await this.getMySQLPool(cluster).getConnection();
-      try {
-        await conn.beginTransaction();
-        for (const { tableName, rows } of tableEntries) {
-          for (const row of rows) {
-            const keys = Object.keys(row);
-            const cols = keys
-              .map((k) => this.escapeIdentifier(k, ClusterType.MYSQL))
-              .join(', ');
-            const placeholders = keys.map(() => '?').join(', ');
-            await conn.query(
-              `INSERT INTO ${this.escapeIdentifier(tableName, ClusterType.MYSQL)} (${cols}) VALUES (${placeholders})`,
-              Object.values(row),
-            );
-          }
-        }
-        await conn.commit();
-      } catch (e) {
-        await conn.rollback();
-        throw new BadRequestException(
-          `Restore failed and was rolled back: ${e.message}`,
-        );
-      } finally {
-        conn.release();
-      }
-    }
-
-    return { success: true };
-  }
-
-  private parseCSVRow(headers: string[], line: string) {
-    const values = line.split(',');
-    const row: Record<string, any> = {};
-    headers.forEach((h, idx) => {
-      row[h] = values[idx];
-    });
-    return row;
+    return { names, params, kinds };
   }
 }

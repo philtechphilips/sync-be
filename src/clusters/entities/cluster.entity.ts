@@ -1,6 +1,7 @@
 import { Entity, Column } from 'typeorm';
 import { Exclude, Expose } from 'class-transformer';
 import { UserOwnedEntity } from '../../common/entities/user-owned.entity';
+import type { SslMode } from '../engine/types';
 
 export enum ClusterType {
   MYSQL = 'mysql',
@@ -61,4 +62,17 @@ export class Cluster extends UserOwnedEntity {
   @Expose()
   @Column({ type: 'boolean', default: false })
   isLocal: boolean;
+
+  /**
+   * Name of a connection saved in the local agent (`synqdb-agent add`).
+   * When set, the host and credentials live only on the agent's machine.
+   */
+  @Expose()
+  @Column({ type: 'varchar', length: 100, nullable: true })
+  agentConnection: string | null;
+
+  /** TLS for the database connection: disable | prefer | require | verify. */
+  @Expose()
+  @Column({ type: 'varchar', length: 16, default: 'prefer' })
+  sslMode: SslMode;
 }

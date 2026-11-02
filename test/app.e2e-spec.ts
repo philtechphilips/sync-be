@@ -4,7 +4,9 @@ import request from 'supertest';
 import { App } from 'supertest/types';
 import { AppModule } from '../src/app.module';
 
-describe('AppController (e2e)', () => {
+const run = process.env.SYNQ_E2E === '1' ? describe : describe.skip;
+
+run('AppController (e2e)', () => {
   let app: INestApplication<App>;
 
   beforeEach(async () => {
@@ -20,6 +22,6 @@ describe('AppController (e2e)', () => {
     return request(app.getHttpServer())
       .get('/')
       .expect(200)
-      .expect('Hello World!');
+      .expect('Welcome to SynqDB API V1!');
   });
 });

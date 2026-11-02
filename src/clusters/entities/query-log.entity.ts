@@ -20,14 +20,14 @@ export class QueryLog {
   @Column({ name: 'clusterId' })
   clusterId: string;
 
-  @ManyToOne(() => Cluster)
+  @ManyToOne(() => Cluster, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'clusterId' })
   cluster: Cluster;
 
   @Column({ name: 'userId' })
   userId: string;
 
-  @ManyToOne(() => User)
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'userId' })
   user: User;
 

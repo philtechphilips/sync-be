@@ -1,33 +1,28 @@
+import { Transform } from 'class-transformer';
 import {
   IsEmail,
   IsNotEmpty,
+  IsOptional,
   IsString,
   Length,
-  IsOptional,
 } from 'class-validator';
-import { Type } from 'class-transformer';
 
 export class RegisterAuthDto {
   @IsString()
-  @IsNotEmpty()
-  @Length(1, 255)
+  @Length(8, 128, {
+    message: 'Password must be between 8 and 128 characters long',
+  })
   password: string;
 
   @IsString()
   @IsOptional()
-  full_name: string;
+  @Length(1, 100)
+  full_name?: string;
 
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : value,
+  )
   @IsEmail()
   @IsNotEmpty()
   email: string;
-
-  @IsString()
-  @IsOptional()
-  role?: string;
-
-  @Type(() => Date)
-  created_at: Date;
-
-  @Type(() => Date)
-  updated_at: Date;
 }

@@ -5,6 +5,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { User } from './entities/user.entity';
+import { AuthSession } from './entities/auth-session.entity';
+import { CliLoginRequest } from './entities/cli-login-request.entity';
 import { AuthRepo } from './repository/auth.repository';
 import { LocalStrategy } from './strategies/local.strategy';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -14,7 +16,7 @@ import { AgentModule } from '../agent/agent.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User]),
+    TypeOrmModule.forFeature([User, AuthSession, CliLoginRequest]),
     PassportModule,
     JwtModule.register({
       secret: config.JWT.SECRET,

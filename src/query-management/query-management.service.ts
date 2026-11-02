@@ -1,8 +1,13 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { SavedQuery } from './entities/saved-query.entity';
 import { Collection } from './entities/collection.entity';
+import { Cluster } from '../clusters/entities/cluster.entity';
 import {
   CreateSavedQueryDto,
   UpdateSavedQueryDto,
@@ -16,12 +21,45 @@ export class QueryManagementService {
     private readonly queryRepo: Repository<SavedQuery>,
     @InjectRepository(Collection)
     private readonly collectionRepo: Repository<Collection>,
+    @InjectRepository(Cluster)
+    private readonly clusterRepo: Repository<Cluster>,
   ) {}
+
+  /** Referenced clusters/collections must belong to the same user. */
+  private async assertOwned(
+    userId: string,
+    refs: { clusterId?: string | null; collectionId?: string | null },
+  ) {
+    if (
+      refs.clusterId &&
+      !(await this.clusterRepo.exists({
+        where: { id: refs.clusterId, userId },
+      }))
+    ) {
+      throw new BadRequestException('Cluster not found.');
+    }
+    if (
+      refs.collectionId &&
+      !(await this.collectionRepo.exists({
+        where: { id: refs.collectionId, userId },
+      }))
+    ) {
+      throw new BadRequestException('Collection not found.');
+    }
+  }
 
   // --- Saved Queries ---
 
   async createQuery(userId: string, dto: CreateSavedQueryDto) {
-    const query = this.queryRepo.create({ ...dto, userId });
+    await this.assertOwned(userId, dto);
+    const query = this.queryRepo.create({
+      name: dto.name,
+      query: dto.query,
+      clusterId: dto.clusterId,
+      collectionId: dto.collectionId,
+      tags: dto.tags,
+      userId,
+    });
     return this.queryRepo.save(query);
   }
 
@@ -44,8 +82,19 @@ export class QueryManagementService {
 
   async updateQuery(id: string, userId: string, dto: UpdateSavedQueryDto) {
     const query = await this.findOneQuery(id, userId);
-    Object.assign(query, dto);
-    return this.queryRepo.save(query);
+    await this.assertOwned(userId, dto);
+    for (const key of [
+      'name',
+      'query',
+      'clusterId',
+      'collectionId',
+      'tags',
+    ] as const) {
+      if (dto[key] !== undefined) (query as any)[key] = dto[key];
+    }
+    // Drop loaded relations so TypeORM saves the new foreign keys.
+    const { cluster: _cluster, collection: _collection, ...plain } = query;
+    return this.queryRepo.save(plain);
   }
 
   async removeQuery(id: string, userId: string) {
@@ -56,7 +105,12 @@ export class QueryManagementService {
   // --- Collections ---
 
   async createCollection(userId: string, dto: CreateCollectionDto) {
-    const collection = this.collectionRepo.create({ ...dto, userId });
+    await this.assertOwned(userId, { collectionId: dto.parentId });
+    const collection = this.collectionRepo.create({
+      name: dto.name,
+      parentId: dto.parentId,
+      userId,
+    });
     return this.collectionRepo.save(collection);
   }
 
@@ -79,8 +133,34 @@ export class QueryManagementService {
 
   async updateCollection(id: string, userId: string, dto: UpdateCollectionDto) {
     const collection = await this.findOneCollection(id, userId);
-    Object.assign(collection, dto);
-    return this.collectionRepo.save(collection);
+    if (dto.parentId !== undefined && dto.parentId !== null) {
+      await this.assertOwned(userId, { collectionId: dto.parentId });
+      // A folder can't be moved into itself or one of its own descendants.
+      const all = await this.collectionRepo.find({
+        where: { userId },
+        select: ['id', 'parentId'],
+      });
+      const parentOf = new Map(all.map((c) => [c.id, c.parentId]));
+      for (
+        let cur: string | null | undefined = dto.parentId;
+        cur;
+        cur = parentOf.get(cur)
+      ) {
+        if (cur === id)
+          throw new BadRequestException(
+            'A collection cannot be moved into itself.',
+          );
+      }
+    }
+    if (dto.name !== undefined) collection.name = dto.name;
+    if (dto.parentId !== undefined) collection.parentId = dto.parentId;
+    const {
+      children: _children,
+      queries: _queries,
+      parent: _parent,
+      ...plain
+    } = collection;
+    return this.collectionRepo.save(plain);
   }
 
   async removeCollection(id: string, userId: string) {

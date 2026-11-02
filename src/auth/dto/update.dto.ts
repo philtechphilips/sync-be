@@ -1,4 +1,4 @@
-import { PartialType } from '@nestjs/mapped-types';
-import { RegisterAuthDto } from './register.dto';
+import { UpdateProfileDto } from './update-profile.dto';
 
-export class UpdateAuthDto extends PartialType(RegisterAuthDto) {}
+/** PATCH /v1/auth accepts the same safe profile fields as /v1/auth/profile. */
+export class UpdateAuthDto extends UpdateProfileDto {}
