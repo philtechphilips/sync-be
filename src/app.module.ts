@@ -8,6 +8,7 @@ import { ClustersModule } from './clusters/clusters.module';
 import { AIModule } from './ai/ai.module';
 import { QueryManagementModule } from './query-management/query-management.module';
 import { AgentModule } from './agent/agent.module';
+import { SchemaGuard } from './database/schema-guard';
 
 @Module({
   imports: [
@@ -19,6 +20,6 @@ import { AgentModule } from './agent/agent.module';
     AgentModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, SchemaGuard],
 })
 export class AppModule {}
