@@ -50,7 +50,7 @@
     "joi": "^18.0.1",
     "mssql": "^11.0.1",
     "mysql2": "^3.20.0",
-    "nodemailer": "^7.0.10",
+    "nodemailer": "^10.3.1",
     "openai": "^6.32.0",
     "passport-jwt": "^4.0.1",
     "passport-local": "^1.0.0",
@@ -113,5 +113,8 @@
     "setupFiles": [
       "<rootDir>/../test/env.setup.ts"
     ]
+  },
+  "overrides": {
+    "brace-expansion@<1.1.21": "1.1.21"
   }
 }
